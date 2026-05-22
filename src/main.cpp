@@ -1,247 +1,181 @@
-#include "stm32f4xx_hal.h"
-#include <cstring>
+#include "stm32f4xx.h"
 
-// Nucleo F446RE onboard LED LD2
-#define LED_GPIO_PORT GPIOA
-#define LED_PIN       GPIO_PIN_5
+// -----------------------------------------------------------------------------
+// Nucleo F446RE pin definitions
+// LED LD2  = PA5
+// Button B1 = PC13 (active low)
+// USART2 TX = PA2, RX = PA3 (AF7)
+// Clock: 16 MHz HSI
+// -----------------------------------------------------------------------------
 
-// Nucleo F446RE blue user button B1
-#define BUTTON_GPIO_PORT GPIOC
-#define BUTTON_PIN       GPIO_PIN_13
-
-// UART Handler
-UART_HandleTypeDef huart2;
-
-void SystemClock_Config(void);
-static void GPIO_Init(void);
-static void UART2_Init(void);
-static void Debug_Print(const char *msg);
-void Error_Handler(void);
+static void clock_init(void);
+static void gpio_init(void);
+static void uart2_init(void);
+static void debug_print(const char *msg);
+static void delay(volatile uint32_t count);
+static void error_handler(void);
 
 int main(void)
 {
-    HAL_Init();
-    SystemClock_Config();
-    SystemCoreClockUpdate();
-    GPIO_Init();
-    UART2_Init();
+    clock_init();
+    gpio_init();
+    uart2_init();
 
-    const char msg[] = "Before delay\r\n";
-    Debug_Print(msg);
-    for (volatile uint32_t i = 0; i < 1000000; i++)
-    {
-    }
-    Debug_Print("After delay\r\n");
+    debug_print("Nucleo F446RE Board Test\r\n");
 
-
-    Debug_Print("Nucleo F446RE Board Test\r\n");
-
-    GPIO_PinState lastButtonState = GPIO_PIN_RESET;
 
     while (1)
     {
-        Debug_Print("Loop alive\r\n");
-        GPIO_PinState buttonState = HAL_GPIO_ReadPin(BUTTON_GPIO_PORT, BUTTON_PIN);
 
-        // User button is active-low
-        if (buttonState == GPIO_PIN_RESET)
-        {
-            // Log only when the button first transitions from released to pressed
-            if (lastButtonState == GPIO_PIN_SET)
-            {
-                Debug_Print("Button pressed\r\n");
-            }
+        debug_print("In application space");
+        delay(1000000000);
 
-            HAL_GPIO_TogglePin(LED_GPIO_PORT, LED_PIN);
-            HAL_Delay(150);
-        }
-        else
-        {
-            HAL_GPIO_WritePin(LED_GPIO_PORT, LED_PIN, GPIO_PIN_RESET);
-        }
 
-        lastButtonState = buttonState;
     }
 }
 
-static void GPIO_Init(void)
+// -----------------------------------------------------------------------------
+// Clock: select HSI (16 MHz) as SYSCLK, no PLL
+// -----------------------------------------------------------------------------
+static void clock_init(void)
 {
-    // Enable GPIO peripheral clocks
-    __HAL_RCC_GPIOA_CLK_ENABLE();
-    __HAL_RCC_GPIOC_CLK_ENABLE();
+    // Enable HSI
+    RCC->CR |= RCC_CR_HSION;
 
-    GPIO_InitTypeDef GPIO_InitStruct = {0};
+    // Wait for HSI to be ready
+    while (!(RCC->CR & RCC_CR_HSIRDY)) {}
 
-    // Configure PA5 as output for onboard LED
-    GPIO_InitStruct.Pin = LED_PIN;
-    GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-    GPIO_InitStruct.Pull = GPIO_NOPULL;
-    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-    HAL_GPIO_Init(LED_GPIO_PORT, &GPIO_InitStruct);
+    // Select HSI as SYSCLK
+    RCC->CFGR = (RCC->CFGR & ~RCC_CFGR_SW) | RCC_CFGR_SW_HSI;
 
-    // Configure PC13 as input for user button
-    GPIO_InitStruct.Pin = BUTTON_PIN;
-    GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
-    GPIO_InitStruct.Pull = GPIO_NOPULL;
-    HAL_GPIO_Init(BUTTON_GPIO_PORT, &GPIO_InitStruct);
+    // Wait until HSI is used as SYSCLK
+    while ((RCC->CFGR & RCC_CFGR_SWS) != RCC_CFGR_SWS_HSI) {}
+
+    // AHB, APB1, APB2 all at full speed (no dividers)
+    RCC->CFGR &= ~(RCC_CFGR_HPRE | RCC_CFGR_PPRE1 | RCC_CFGR_PPRE2);
 }
 
-void SystemClock_Config(void)
+// -----------------------------------------------------------------------------
+// GPIO:
+//   PA5  = output push-pull (LED LD2)
+//   PC13 = input floating (button B1)
+// -----------------------------------------------------------------------------
+static void gpio_init(void)
 {
-    // Basic clock setup using internal HSI oscillator.
-    // This is enough for a simple board test.
+    // Enable GPIOA and GPIOC clocks
+    RCC->AHB1ENR |= RCC_AHB1ENR_GPIOAEN | RCC_AHB1ENR_GPIOCEN;
 
-    RCC_OscInitTypeDef RCC_OscInitStruct = {0};
-    RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
+    // Small delay to let clocks stabilize
+    volatile uint32_t dummy = RCC->AHB1ENR;
+    (void)dummy;
 
-    __HAL_RCC_PWR_CLK_ENABLE();
+    // PA5 as output (MODER bits 11:10 = 01)
+    GPIOA->MODER &= ~(3U << 10);
+    GPIOA->MODER |=  (1U << 10);
 
-    RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
-    RCC_OscInitStruct.HSIState = RCC_HSI_ON;
-    RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
-    RCC_OscInitStruct.PLL.PLLState = RCC_PLL_NONE;
+    // PA5 push-pull (OTYPER bit 5 = 0, already default)
+    GPIOA->OTYPER &= ~(1U << 5);
 
-    if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
-    {
-        while (1)
-        {
-        }
-    }
+    // PA5 low speed (OSPEEDR bits 11:10 = 00, already default)
+    GPIOA->OSPEEDR &= ~(3U << 10);
 
-    RCC_ClkInitStruct.ClockType =
-        RCC_CLOCKTYPE_HCLK |
-        RCC_CLOCKTYPE_SYSCLK |
-        RCC_CLOCKTYPE_PCLK1 |
-        RCC_CLOCKTYPE_PCLK2;
+    // PA5 no pull (PUPDR bits 11:10 = 00, already default)
+    GPIOA->PUPDR &= ~(3U << 10);
 
-    RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_HSI;
-    RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
-    RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV1;
-    RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
+    // LED off initially
+    GPIOA->BSRR = (1U << (5 + 16));
 
-    if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_0) != HAL_OK)
-    {
-        while (1)
-        {
-        }
-    }
+    // PC13 as input (MODER bits 27:26 = 00, already default)
+    GPIOC->MODER &= ~(3U << 26);
+
+    // PC13 no pull (PUPDR bits 27:26 = 00, already default)
+    GPIOC->PUPDR &= ~(3U << 26);
 }
 
-static void UART2_Init(void)
+// -----------------------------------------------------------------------------
+// UART2: PA2=TX, PA3=RX, AF7, 115200 8N1, 16MHz clock
+// BRR = 16000000 / 115200 = 138
+// -----------------------------------------------------------------------------
+static void uart2_init(void)
 {
-    __HAL_RCC_GPIOA_CLK_ENABLE();
-    __HAL_RCC_USART2_CLK_ENABLE();
+    // Enable GPIOA and USART2 clocks
+    RCC->AHB1ENR |= RCC_AHB1ENR_GPIOAEN;
+    RCC->APB1ENR |= RCC_APB1ENR_USART2EN;
 
-    // Force USART2 into a clean reset state first
-    __HAL_RCC_USART2_FORCE_RESET();
-    __HAL_RCC_USART2_RELEASE_RESET();
+    // Reset USART2
+    RCC->APB1RSTR |=  RCC_APB1RSTR_USART2RST;
+    RCC->APB1RSTR &= ~RCC_APB1RSTR_USART2RST;
 
-    GPIO_InitTypeDef GPIO_InitStruct = {0};
+    // PA2 and PA3 to alternate function mode (MODER = 10)
+    GPIOA->MODER &= ~((3U << 4) | (3U << 6));
+    GPIOA->MODER |=  ((2U << 4) | (2U << 6));
 
-    // USART2 TX = PA2
-    // USART2 RX = PA3
-    GPIO_InitStruct.Pin = GPIO_PIN_2 | GPIO_PIN_3;
-    GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
-    GPIO_InitStruct.Pull = GPIO_PULLUP;
-    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
-    GPIO_InitStruct.Alternate = GPIO_AF7_USART2;
-    HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+    // PA2 and PA3 push-pull output type
+    GPIOA->OTYPER &= ~((1U << 2) | (1U << 3));
 
-    huart2.Instance = USART2;
-    huart2.Init.BaudRate = 115200;
-    huart2.Init.WordLength = UART_WORDLENGTH_8B;
-    huart2.Init.StopBits = UART_STOPBITS_1;
-    huart2.Init.Parity = UART_PARITY_NONE;
-    huart2.Init.Mode = UART_MODE_TX_RX;
-    huart2.Init.HwFlowCtl = UART_HWCONTROL_NONE;
-    huart2.Init.OverSampling = UART_OVERSAMPLING_16;
+    // PA2 and PA3 very high speed
+    GPIOA->OSPEEDR |= ((3U << 4) | (3U << 6));
 
-    if (HAL_UART_Init(&huart2) != HAL_OK)
-    {
-        Error_Handler();
-    }
+    // PA2 and PA3 pull-up
+    GPIOA->PUPDR &= ~((3U << 4) | (3U << 6));
+    GPIOA->PUPDR |=  ((1U << 4) | (1U << 6));
+
+    // PA2 and PA3 alternate function = AF7 (USART2)
+    // AFR[0] covers pins 0-7
+    GPIOA->AFR[0] &= ~((0xFU << 8) | (0xFU << 12));
+    GPIOA->AFR[0] |=  ((7U  << 8) | (7U  << 12));
+
+    // Baud rate: 16MHz / 115200 = 138
+    USART2->BRR = 16000000 / 115200; // Set baud rate to 115200
+
+    // 8 data bits, no parity, 1 stop bit (all default)
+    USART2->CR2 &= ~USART_CR2_STOP;   // 1 stop bit
+    USART2->CR1  = USART_CR1_UE       // enable USART
+                 | USART_CR1_TE       // enable TX
+                 | USART_CR1_RE;      // enable RX
 }
 
-static void Debug_Print(const char *msg)
+// -----------------------------------------------------------------------------
+// Print a null-terminated string over UART2
+// -----------------------------------------------------------------------------
+static void debug_print(const char *msg)
 {
-    if (msg == nullptr)
+    if (msg == 0) return;
+
+    while (*msg)
     {
-        return;
+        // Wait for TX register empty
+        while (!(USART2->SR & USART_SR_TXE)) {}
+        USART2->DR = (uint8_t)*msg++;
     }
 
-    //uint16_t length = static_cast<uint16_t>(std::strlen(message));
-
-    // Wait for UART to become ready before starting a new transmit
-    uint32_t startTick = HAL_GetTick();
-    while (HAL_UART_GetState(&huart2) != HAL_UART_STATE_READY)
-    {
-        if ((HAL_GetTick() - startTick) > 1000)
-        {
-            Error_Handler();
-        }
-    }
-
-    HAL_StatusTypeDef status = HAL_BUSY;
-
-    // Retry if UART is busy
-    startTick = HAL_GetTick();
-    while (status == HAL_BUSY)
-    {
-        status = HAL_UART_Transmit(
-            &huart2,
-            reinterpret_cast<uint8_t *>(const_cast<char *>(msg)),
-            std::strlen(msg),
-            HAL_MAX_DELAY
-        );
-
-        if ((HAL_GetTick() - startTick) > 1000)
-        {
-            Error_Handler();
-        }
-    }
-
-    if (status != HAL_OK)
-    {
-        Error_Handler();
-    }
-
-    // Wait until the final byte has fully left the UART shift register
-    startTick = HAL_GetTick();
-    while (__HAL_UART_GET_FLAG(&huart2, UART_FLAG_TC) == RESET)
-    {
-        if ((HAL_GetTick() - startTick) > 1000)
-        {
-            Error_Handler();
-        }
-    }
+    // Wait for transmission complete
+    while (!(USART2->SR & USART_SR_TC)) {}
 }
 
-void Error_Handler(void)
+// -----------------------------------------------------------------------------
+// Software delay (count is CPU cycles, roughly)
+// -----------------------------------------------------------------------------
+static void delay(volatile uint32_t count)
 {
-    // If you are debugging with ST-LINK, this will break here.
-    __BKPT(0);
+    while (count--) {}
+}
 
-    // Make sure the LED GPIO clock is enabled.
-    __HAL_RCC_GPIOA_CLK_ENABLE();
+// -----------------------------------------------------------------------------
+// Error handler: blink LED rapidly forever
+// -----------------------------------------------------------------------------
+static void error_handler(void)
+{
+    // Ensure GPIOA clock is on
+    RCC->AHB1ENR |= RCC_AHB1ENR_GPIOAEN;
 
-    GPIO_InitTypeDef GPIO_InitStruct = {0};
+    // PA5 as output
+    GPIOA->MODER &= ~(3U << 10);
+    GPIOA->MODER |=  (1U << 10);
 
-    // LD2 on the Nucleo F446RE is PA5.
-    GPIO_InitStruct.Pin = GPIO_PIN_5;
-    GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-    GPIO_InitStruct.Pull = GPIO_NOPULL;
-    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-
-    HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
-
-    // Blink rapidly forever to indicate an error.
     while (1)
     {
-        HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_5);
-
-        for (volatile uint32_t i = 0; i < 500000; i++)
-        {
-            // crude delay, avoids depending on HAL_Delay()
-        }
+        GPIOA->ODR ^= (1U << 5);
+        delay(500000);
     }
 }
