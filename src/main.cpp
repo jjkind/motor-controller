@@ -64,15 +64,25 @@ int main(void)
     debug_print("Low-side:  PA7/PB0/PB1\r\n");
     debug_print("PWM: 20 kHz center-aligned, 50 percent duty, dead time enabled\r\n");
 
+    int32_t previous_encoder_count = (int32_t)TIM2->CNT;
+
     while (1)
     {
-        debug_print("Reading Encoder\r\n");
         int32_t encoder_count = (int32_t)TIM2->CNT;
-        char count_string[16];
-        int32_to_string(encoder_count, count_string, sizeof(count_string));
-        debug_print("Encoder count: ");
-        debug_print(count_string);
-        debug_print("\r\n");
+
+        if (encoder_count != previous_encoder_count)
+        {
+            char count_string[16];
+
+            int32_to_string(encoder_count, count_string, sizeof(count_string));
+
+            debug_print("Encoder count: ");
+            debug_print(count_string);
+            debug_print("\r\n");
+
+            previous_encoder_count = encoder_count;
+        }
+
         delay(1000000);
     }
 }
