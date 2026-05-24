@@ -3,37 +3,44 @@
 // -----------------------------------------------------------------------------
 // Nucleo F446RE pin definitions
 // LED LD2  = PA5
-// Button B1 = PC13
+// Button B1 = PC13 (active low)
 // USART2 TX = PA2, RX = PA3 (AF7)
-// PWM GPIO candidates:
-//   PA8  = TIM1_CH1, AF1
-//   PA9  = TIM1_CH2, AF1
-//   PA10 = TIM1_CH3, AF1
-//
 // Clock: 16 MHz HSI
-// -----------------------------------------------------------------------------
+//
+// TIM1 complementary PWM pin mapping:
+//   Phase A high: PA8  = TIM1_CH1,  AF1
+//   Phase A low:  PA7  = TIM1_CH1N, AF1
+//
+//   Phase B high: PA9  = TIM1_CH2,  AF1
+//   Phase B low:  PB0  = TIM1_CH2N, AF1
+//
+//   Phase C high: PA10 = TIM1_CH3,  AF1
+//   Phase C low:  PB1  = TIM1_CH3N, AF1
+//
+// TIM1 setup:
+//   Timer clock:    16 MHz
+//   PWM mode:       center-aligned PWM mode 1
+//   PWM frequency:  20 kHz
+//   ARR:            400
+//   Initial duty:   50% on all three phases
+//   Dead time:      ~1 us using DTG = 16 at 16 MHz timer clock
 //
 // Notes:
 // - This file intentionally uses register-level programming through CMSIS device
 //   definitions only. No HAL is used.
-// - PA8/PA9/PA10 are configured as alternate-function outputs for TIM1 PWM.
-// - TIM1 will be used for High/Low side PWM control
-// - TIM2 is configured for encoder mode.
+// - Do not connect this to a real power stage until you have scoped the gate
+//   driver inputs and confirmed polarity, dead time, and fault behavior.
+// -----------------------------------------------------------------------------
 
-// PWM Pin Output Mapping:
-// Phase A high: PA8  / TIM1_CH1
-// Phase A low:  PA7  / TIM1_CH1N
-
-// Phase B high: PA9  / TIM1_CH2
-// Phase B low:  PB0  / TIM1_CH2N
-
-// Phase C high: PA10 / TIM1_CH3
-// Phase C low:  PB1  / TIM1_CH3N
+#define TIM1_PWM_ARR                400U
+#define TIM1_PWM_50_PERCENT         (TIM1_PWM_ARR / 2U) 
+#define TIM1_DEADTIME_TICKS         16U  // ~1 us at 16 MHz timer clock
 
 static void clock_init(void);
 static void gpio_init(void);
+static void tim1_pwm_gpio_init(void);
+static void tim1_pwm_init(void);
 static void encoder_tim2_init(void);
-static void pwm_gpio_init(void);
 static void uart2_init(void);
 static void debug_print(const char *msg);
 static void delay(volatile uint32_t count);
@@ -44,16 +51,18 @@ int main(void)
 {
     clock_init();
     gpio_init();
+
+    tim1_pwm_gpio_init();
+    tim1_pwm_init();
     encoder_tim2_init();
-    pwm_gpio_init();
+
     uart2_init();
 
     debug_print("Nucleo F446RE Board Test\r\n");
-    debug_print("PA8/PA9/PA10 configured for TIM1 PWM alternate function\r\n");
-    debug_print("TIM2 configured for encoder mode\r\n");
-    debug_print("USART2 configured for serial communication\r\n");  
-    debug_print("All peripherals initialized successfully\r\n");
-
+    debug_print("TIM1 complementary PWM configured\r\n");
+    debug_print("High-side: PA8/PA9/PA10\r\n");
+    debug_print("Low-side:  PA7/PB0/PB1\r\n");
+    debug_print("PWM: 20 kHz center-aligned, 50 percent duty, dead time enabled\r\n");
 
     while (1)
     {
@@ -128,6 +137,227 @@ static void gpio_init(void)
     // PC13 no pull (PUPDR bits 27:26 = 00)
     GPIOC->PUPDR &= ~(3U << 26);
 }
+
+// -----------------------------------------------------------------------------
+// TIM1 complementary PWM GPIO setup:
+//   PA8  = TIM1_CH1,  AF1, Phase A high side
+//   PA7  = TIM1_CH1N, AF1, Phase A low side
+//   PA9  = TIM1_CH2,  AF1, Phase B high side
+//   PB0  = TIM1_CH2N, AF1, Phase B low side
+//   PA10 = TIM1_CH3,  AF1, Phase C high side
+//   PB1  = TIM1_CH3N, AF1, Phase C low side
+// -----------------------------------------------------------------------------
+static void tim1_pwm_gpio_init(void)
+{
+    // Enable GPIOA and GPIOB clocks
+    RCC->AHB1ENR |= RCC_AHB1ENR_GPIOAEN | RCC_AHB1ENR_GPIOBEN;
+
+    // Readback after enabling clocks
+    volatile uint32_t dummy = RCC->AHB1ENR;
+    (void)dummy;
+
+    // -------------------------------------------------------------------------
+    // GPIOA pins: PA7, PA8, PA9, PA10 -> AF1
+    // -------------------------------------------------------------------------
+
+    // Alternate function mode
+    GPIOA->MODER &= ~((3U << (7U  * 2U)) |
+                      (3U << (8U  * 2U)) |
+                      (3U << (9U  * 2U)) |
+                      (3U << (10U * 2U)));
+
+    GPIOA->MODER |=  ((2U << (7U  * 2U)) |
+                      (2U << (8U  * 2U)) |
+                      (2U << (9U  * 2U)) |
+                      (2U << (10U * 2U)));
+
+    // Push-pull
+    GPIOA->OTYPER &= ~((1U << 7U) |
+                       (1U << 8U) |
+                       (1U << 9U) |
+                       (1U << 10U));
+
+    // Very high speed for PWM edges
+    GPIOA->OSPEEDR &= ~((3U << (7U  * 2U)) |
+                        (3U << (8U  * 2U)) |
+                        (3U << (9U  * 2U)) |
+                        (3U << (10U * 2U)));
+
+    GPIOA->OSPEEDR |=  ((3U << (7U  * 2U)) |
+                        (3U << (8U  * 2U)) |
+                        (3U << (9U  * 2U)) |
+                        (3U << (10U * 2U)));
+
+    // No pull-up/pull-down
+    GPIOA->PUPDR &= ~((3U << (7U  * 2U)) |
+                      (3U << (8U  * 2U)) |
+                      (3U << (9U  * 2U)) |
+                      (3U << (10U * 2U)));
+
+    // PA7 is in AFR[0], field 7. AF1 = TIM1_CH1N.
+    GPIOA->AFR[0] &= ~(0xFU << (7U * 4U));
+    GPIOA->AFR[0] |=  (1U   << (7U * 4U));
+
+    // PA8/PA9/PA10 are in AFR[1], fields 0/1/2. AF1 = TIM1_CH1/2/3.
+    GPIOA->AFR[1] &= ~((0xFU << ((8U  - 8U) * 4U)) |
+                       (0xFU << ((9U  - 8U) * 4U)) |
+                       (0xFU << ((10U - 8U) * 4U)));
+
+    GPIOA->AFR[1] |=  ((1U << ((8U  - 8U) * 4U)) |
+                       (1U << ((9U  - 8U) * 4U)) |
+                       (1U << ((10U - 8U) * 4U)));
+
+    // -------------------------------------------------------------------------
+    // GPIOB pins: PB0, PB1 -> AF1
+    // -------------------------------------------------------------------------
+
+    // Alternate function mode
+    GPIOB->MODER &= ~((3U << (0U * 2U)) |
+                      (3U << (1U * 2U)));
+
+    GPIOB->MODER |=  ((2U << (0U * 2U)) |
+                      (2U << (1U * 2U)));
+
+    // Push-pull
+    GPIOB->OTYPER &= ~((1U << 0U) |
+                       (1U << 1U));
+
+    // Very high speed
+    GPIOB->OSPEEDR &= ~((3U << (0U * 2U)) |
+                        (3U << (1U * 2U)));
+
+    GPIOB->OSPEEDR |=  ((3U << (0U * 2U)) |
+                        (3U << (1U * 2U)));
+
+    // No pull-up/pull-down
+    GPIOB->PUPDR &= ~((3U << (0U * 2U)) |
+                      (3U << (1U * 2U)));
+
+    // PB0/PB1 are in AFR[0], fields 0/1. AF1 = TIM1_CH2N/TIM1_CH3N.
+    GPIOB->AFR[0] &= ~((0xFU << (0U * 4U)) |
+                       (0xFU << (1U * 4U)));
+
+    GPIOB->AFR[0] |=  ((1U << (0U * 4U)) |
+                       (1U << (1U * 4U)));
+}
+
+
+// -----------------------------------------------------------------------------
+// TIM1 complementary PWM setup
+//
+// Generates three center-aligned PWM channels plus complementary outputs:
+//   CH1/CH1N, CH2/CH2N, CH3/CH3N
+//
+// At 16 MHz timer clock and ARR=400 in center-aligned mode:
+//   f_pwm = 16 MHz / (2 * ARR) = 20 kHz
+//
+// Duty is controlled by:
+//   TIM1->CCR1 = Phase A duty ticks
+//   TIM1->CCR2 = Phase B duty ticks
+//   TIM1->CCR3 = Phase C duty ticks
+//
+// Range:
+//   0 <= CCRx <= TIM1_PWM_ARR
+// -----------------------------------------------------------------------------
+static void tim1_pwm_init(void)
+{
+    // Enable TIM1 clock. TIM1 is on APB2.
+    RCC->APB2ENR |= RCC_APB2ENR_TIM1EN;
+
+    // Readback after enabling clock
+    volatile uint32_t dummy = RCC->APB2ENR;
+    (void)dummy;
+
+    // Reset TIM1 to a known state
+    RCC->APB2RSTR |=  RCC_APB2RSTR_TIM1RST;
+    RCC->APB2RSTR &= ~RCC_APB2RSTR_TIM1RST;
+
+    // Disable counter during configuration
+    TIM1->CR1 &= ~TIM_CR1_CEN;
+
+    // Prescaler = 0: timer clock = 16 MHz
+    TIM1->PSC = 0U;
+
+    // Auto-reload value for 20 kHz center-aligned PWM
+    TIM1->ARR = TIM1_PWM_ARR;
+
+    // Initial duty cycle: 50% on all three phases
+    TIM1->CCR1 = TIM1_PWM_50_PERCENT;
+    TIM1->CCR2 = TIM1_PWM_50_PERCENT;
+    TIM1->CCR3 = TIM1_PWM_50_PERCENT;
+
+    // -------------------------------------------------------------------------
+    // Configure PWM mode 1 on CH1, CH2, CH3 with preload enabled
+    // -------------------------------------------------------------------------
+
+    // CH1:
+    // OC1M bits = 110: PWM mode 1
+    // OC1PE bit = 1: preload enable
+    TIM1->CCMR1 &= ~(TIM_CCMR1_OC1M | TIM_CCMR1_OC1PE);
+    TIM1->CCMR1 |=  ((6U << TIM_CCMR1_OC1M_Pos) | TIM_CCMR1_OC1PE);
+
+    // CH2:
+    // OC2M bits = 110: PWM mode 1
+    // OC2PE bit = 1: preload enable
+    TIM1->CCMR1 &= ~(TIM_CCMR1_OC2M | TIM_CCMR1_OC2PE);
+    TIM1->CCMR1 |=  ((6U << TIM_CCMR1_OC2M_Pos) | TIM_CCMR1_OC2PE);
+
+    // CH3:
+    // OC3M bits = 110: PWM mode 1
+    // OC3PE bit = 1: preload enable
+    TIM1->CCMR2 &= ~(TIM_CCMR2_OC3M | TIM_CCMR2_OC3PE);
+    TIM1->CCMR2 |=  ((6U << TIM_CCMR2_OC3M_Pos) | TIM_CCMR2_OC3PE);
+
+    // -------------------------------------------------------------------------
+    // Enable main and complementary channel outputs
+    // -------------------------------------------------------------------------
+
+    // Clear polarity bits first:
+    // CCxP  = 0: active high main output
+    // CCxNP = 0: active high complementary output
+    TIM1->CCER &= ~(TIM_CCER_CC1P  | TIM_CCER_CC1NP |
+                    TIM_CCER_CC2P  | TIM_CCER_CC2NP |
+                    TIM_CCER_CC3P  | TIM_CCER_CC3NP);
+
+    // Enable CH1/CH1N, CH2/CH2N, CH3/CH3N
+    TIM1->CCER |= (TIM_CCER_CC1E  | TIM_CCER_CC1NE |
+                   TIM_CCER_CC2E  | TIM_CCER_CC2NE |
+                   TIM_CCER_CC3E  | TIM_CCER_CC3NE);
+
+    // -------------------------------------------------------------------------
+    // Dead time and main output enable
+    // -------------------------------------------------------------------------
+
+    // BDTR:
+    // DTG = dead-time generator value.
+    // With CKD=0 and 16 MHz timer clock, 1 timer tick = 62.5 ns.
+    // DTG=16 gives approximately 1 us dead time.
+    //
+    // MOE = main output enable. Without MOE, TIM1 outputs do not drive pins.
+    TIM1->BDTR = ((TIM1_DEADTIME_TICKS & 0xFFU) << TIM_BDTR_DTG_Pos) |
+                 TIM_BDTR_MOE;
+
+    // -------------------------------------------------------------------------
+    // Center-aligned PWM and preload
+    // -------------------------------------------------------------------------
+
+    // CR1:
+    // ARPE = auto-reload preload enable
+    // CMS  = 01: center-aligned mode 1
+    // DIR  = 0: starts counting up
+    TIM1->CR1 &= ~(TIM_CR1_CMS | TIM_CR1_DIR);
+    TIM1->CR1 |=  TIM_CR1_ARPE | (1U << TIM_CR1_CMS_Pos);
+
+    // Generate update event to load PSC/ARR/CCR preload values
+    TIM1->EGR = TIM_EGR_UG;
+
+    // Clear update flag after forced update
+    TIM1->SR &= ~TIM_SR_UIF;
+
+    // Enable counter
+    TIM1->CR1 |= TIM_CR1_CEN;
+}
+
 
 // -----------------------------------------------------------------------------
 // Encoder TIM2 setup:
@@ -253,74 +483,6 @@ static void encoder_tim2_init(void)
     TIM2->CR1 |= TIM_CR1_CEN;
 }
 
-// -----------------------------------------------------------------------------
-// PWM GPIO setup only:
-//   PA8  = TIM1_CH1, AF1
-//   PA9  = TIM1_CH2, AF1
-//   PA10 = TIM1_CH3, AF1
-//
-// These three pins are a convenient 3-phase PWM group because they are all on
-// TIM1, which is the STM32F446 advanced-control timer commonly used for motor
-// control PWM.
-//
-// This function does not configure TIM1, duty cycle, frequency, complementary
-// outputs, dead time, or enable PWM output. It only prepares PA8/PA9/PA10 so
-// that TIM1 can drive them later.
-// -----------------------------------------------------------------------------
-static void pwm_gpio_init(void)
-{
-    // Enable GPIOA clock
-    RCC->AHB1ENR |= RCC_AHB1ENR_GPIOAEN;
-
-    // Small delay/readback after enabling peripheral clock
-    volatile uint32_t dummy = RCC->AHB1ENR;
-    (void)dummy;
-
-    // PA8, PA9, PA10 to alternate function mode.
-    // MODER:
-    //   00 = input
-    //   01 = general purpose output
-    //   10 = alternate function
-    //   11 = analog
-    GPIOA->MODER &= ~((3U << (8U * 2U)) |
-                      (3U << (9U * 2U)) |
-                      (3U << (10U * 2U)));
-
-    GPIOA->MODER |=  ((2U << (8U * 2U)) |
-                      (2U << (9U * 2U)) |
-                      (2U << (10U * 2U)));
-
-    // Push-pull output type for PA8/PA9/PA10
-    GPIOA->OTYPER &= ~((1U << 8U) |
-                       (1U << 9U) |
-                       (1U << 10U));
-
-    // High speed output for cleaner PWM edges.
-    // Use very high speed for now; this can be reduced later if EMI is a concern.
-    GPIOA->OSPEEDR &= ~((3U << (8U * 2U)) |
-                        (3U << (9U * 2U)) |
-                        (3U << (10U * 2U)));
-
-    GPIOA->OSPEEDR |=  ((3U << (8U * 2U)) |
-                        (3U << (9U * 2U)) |
-                        (3U << (10U * 2U)));
-
-    // No internal pull-up or pull-down on PWM outputs.
-    GPIOA->PUPDR &= ~((3U << (8U * 2U)) |
-                      (3U << (9U * 2U)) |
-                      (3U << (10U * 2U)));
-
-    // Select AF1 for PA8/PA9/PA10.
-    // PA8/PA9/PA10 are in AFR[1], because AFR[0] is pins 0-7 and AFR[1] is pins 8-15.
-    // In AFR[1], PA8 is field 0, PA9 is field 1, PA10 is field 2.
-    GPIOA->AFR[1] &= ~((0xFU << ((8U - 8U) * 4U)) |
-                       (0xFU << ((9U - 8U) * 4U)) |
-                       (0xFU << ((10U - 8U) * 4U)));
-
-    GPIOA->AFR[1] |=  ((1U << ((8U - 8U) * 4U)) |
-                       (1U << ((9U - 8U) * 4U)) |
-                       (1U << ((10U - 8U) * 4U)));
-}
 
 // -----------------------------------------------------------------------------
 // UART2: PA2=TX, PA3=RX, AF7, 115200 8N1, 16MHz clock
@@ -365,6 +527,7 @@ static void uart2_init(void)
                  | USART_CR1_RE;      // enable RX
 }
 
+
 // -----------------------------------------------------------------------------
 // Print a null-terminated string over UART2
 // -----------------------------------------------------------------------------
@@ -382,6 +545,7 @@ static void debug_print(const char *msg)
     // Wait for transmission complete
     while (!(USART2->SR & USART_SR_TC)) {}
 }
+
 
 static void int32_to_string(int32_t value, char *buffer, uint32_t buffer_size)
 {
