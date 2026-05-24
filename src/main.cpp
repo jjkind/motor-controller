@@ -17,8 +17,18 @@
 // - This file intentionally uses register-level programming through CMSIS device
 //   definitions only. No HAL is used.
 // - PA8/PA9/PA10 are configured as alternate-function outputs for TIM1 PWM.
-// - TIM1 itself is not configured or started yet. This only prepares the GPIOs.
-//
+// - TIM1 will be used for High/Low side PWM control
+// - TIM2 is configured for encoder mode.
+
+// PWM Pin Output Mapping:
+// Phase A high: PA8  / TIM1_CH1
+// Phase A low:  PA7  / TIM1_CH1N
+
+// Phase B high: PA9  / TIM1_CH2
+// Phase B low:  PB0  / TIM1_CH2N
+
+// Phase C high: PA10 / TIM1_CH3
+// Phase C low:  PB1  / TIM1_CH3N
 
 static void clock_init(void);
 static void gpio_init(void);
@@ -40,6 +50,10 @@ int main(void)
 
     debug_print("Nucleo F446RE Board Test\r\n");
     debug_print("PA8/PA9/PA10 configured for TIM1 PWM alternate function\r\n");
+    debug_print("TIM2 configured for encoder mode\r\n");
+    debug_print("USART2 configured for serial communication\r\n");  
+    debug_print("All peripherals initialized successfully\r\n");
+
 
     while (1)
     {
