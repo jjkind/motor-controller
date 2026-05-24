@@ -17,6 +17,15 @@
 //   Phase C high: PA10 = TIM1_CH3,  AF1
 //   Phase C low:  PB1  = TIM1_CH3N, AF1
 //
+// Current sense ADC pin mapping:
+//   Current A: PA4 = ADC1_IN4
+//   Current B: PC0 = ADC1_IN10
+//   Current C: PC1 = ADC1_IN11
+//
+// Encoder pin mapping:
+//   Encoder A: PA0 = TIM2_CH1
+//   Encoder B: PA1 = TIM2_CH2
+//
 // TIM1 setup:
 //   Timer clock:    16 MHz
 //   PWM mode:       center-aligned PWM mode 1
@@ -35,30 +44,61 @@
 #define TIM1_PWM_ARR                400U
 #define TIM1_PWM_50_PERCENT         (TIM1_PWM_ARR / 2U) 
 #define TIM1_DEADTIME_TICKS         16U  // ~1 us at 16 MHz timer clock
+
 #define ADC_MAX_COUNTS              4095U
 #define ADC_REFERENCE_VOLTAGE       3.3f
 #define ACS712_ZERO_CURRENT_VOLTAGE 2.5f
 #define ACS712_SENSITIVITY          0.185f  // 185mV/A for ACS712ELC-5A
+
 #define CURRENT_ZERO_CAL_SAMPLES    1000U
+#define CURRENT_PRINT_DECIMATION    20U
+
+#define SYSTICK_1KHZ_RELOAD         16000U  // 16 MHz / 1000 = 16000 ticks for 1 kHz
 
 
 static void clock_init(void);
 static void gpio_init(void);
+
 static void tim1_pwm_gpio_init(void);
 static void tim1_pwm_init(void);
+
 static void encoder_tim2_init(void);
+
 static void adc_current_init(void);
 static void adc_current_calibrate_zero(void);
+static void adc_current_read_all(void);
+static uint16_t adc_read_sequence_value(void);
+static float adc_raw_to_voltage(uint16_t raw);
+static float adc_raw_to_current_amps_with_offset(uint16_t raw, float zero_voltage);
+static void print_adc_raw_and_offsets(void);
+
+static void systick_1khz_init(void);
+static uint8_t systick_1ms_elapsed(void);
+
+static void print_current_values_ma(float current_a, float current_b, float current_c);
+
 static void uart2_init(void);
 static void debug_print(const char *msg);
+
 static void delay(volatile uint32_t count);
 static void error_handler(void);
 static void int32_to_string(int32_t value, char *buffer, uint32_t buffer_size);
+
+
+static volatile uint16_t adc_current_a_raw = 0;
+static volatile uint16_t adc_current_b_raw = 0;
+static volatile uint16_t adc_current_c_raw = 0;
+
+static float current_a_zero_voltage = 0.0f;
+static float current_b_zero_voltage = 0.0f;
+static float current_c_zero_voltage = 0.0f;
 
 int main(void)
 {
     clock_init();
     gpio_init();
+
+    uart2_init();
 
     tim1_pwm_gpio_init();
     tim1_pwm_init();
@@ -68,13 +108,27 @@ int main(void)
 
     encoder_tim2_init();
 
-    uart2_init();
+    adc_current_init();
+
 
     debug_print("Nucleo F446RE Board Test\r\n");
     debug_print("TIM1 complementary PWM configured\r\n");
     debug_print("High-side: PA8/PA9/PA10\r\n");
     debug_print("Low-side:  PA7/PB0/PB1\r\n");
     debug_print("PWM: 20 kHz center-aligned, 50 percent duty, dead time enabled\r\n");
+    debug_print("Encoder inputs: PA0=TIM2_CH1, PA1=TIM2_CH2\r\n");
+    debug_print("ADC current inputs: PA4=IA, PC0=IB, PC1=IC\r\n");
+
+    debug_print("Calibrating current zero offsets. Keep motor current at zero...\r\n");
+    adc_current_calibrate_zero();
+    debug_print("Current zero calibration complete\r\n");
+
+    adc_current_read_all();
+    print_adc_raw_and_offsets();
+
+    systick_1khz_init();
+
+    uint32_t current_sample_count = 0;
 
     int32_t previous_encoder_count = (int32_t)TIM2->CNT;
 
@@ -82,6 +136,7 @@ int main(void)
     {
         int32_t encoder_count = (int32_t)TIM2->CNT;
 
+        // Check if the encoder count has changed since the last print and print if it has
         if (encoder_count != previous_encoder_count)
         {
             char count_string[16];
@@ -93,6 +148,23 @@ int main(void)
             debug_print("\r\n");
 
             previous_encoder_count = encoder_count;
+        }
+
+        // Read current values every 1ms and print every 20ms
+        if (systick_1ms_elapsed())
+        {
+            adc_current_read_all();
+
+            float current_a = adc_raw_to_current_amps_with_offset(adc_current_a_raw, current_a_zero_voltage);
+            float current_b = adc_raw_to_current_amps_with_offset(adc_current_b_raw, current_b_zero_voltage);
+            float current_c = adc_raw_to_current_amps_with_offset(adc_current_c_raw, current_c_zero_voltage);
+
+            current_sample_count++;
+
+            if ((current_sample_count % CURRENT_PRINT_DECIMATION) == 0U)
+            {
+                print_current_values_ma(current_a, current_b, current_c);
+            }
         }
 
         delay(1000000);
@@ -507,129 +579,111 @@ static void encoder_tim2_init(void)
 
 
 // -----------------------------------------------------------------------------
-// ADC Setup for current sensing using ACS712 on PA0, PA1, and PA4:
+// ADC setup for current sensing using ACS712:
+//   Current A -> PA4 = ADC1_IN4
+//   Current B -> PC0 = ADC1_IN10
+//   Current C -> PC1 = ADC1_IN11
+//
+// Important:
+//   PA0 and PA1 are already used by TIM2 encoder input, so they are not used
+//   as ADC current inputs in this version.
 // -----------------------------------------------------------------------------
-void adc_current_init(void)
+static void adc_current_init(void)
 {
-    /*
-     * Using:
-     * PA0 -> ADC1_IN0
-     * PA1 -> ADC1_IN1
-     * PA4 -> ADC1_IN4
-     */
-
-    /*
-     * 1. Enable GPIOA clock.
-     */
-    RCC->AHB1ENR |= RCC_AHB1ENR_GPIOAEN;
-
-    /*
-     * 2. Set PA0, PA1, PA4 to analog mode.
-     * MODER bits:
-     * 00 = input
-     * 01 = output
-     * 10 = alternate function
-     * 11 = analog
-     */
-    GPIOA->MODER |= (3U << (0U * 2U));   // PA0 analog
-    GPIOA->MODER |= (3U << (1U * 2U));   // PA1 analog
-    GPIOA->MODER |= (3U << (4U * 2U));   // PA4 analog
-
-    /*
-     * Disable pull-up/pull-down on analog pins.
-     */
-    GPIOA->PUPDR &= ~(3U << (0U * 2U));
-    GPIOA->PUPDR &= ~(3U << (1U * 2U));
-    GPIOA->PUPDR &= ~(3U << (4U * 2U));
-
-    /*
-     * 3. Enable ADC1 clock.
-     */
+    // Enable GPIOA, GPIOC, and ADC1 clocks
+    RCC->AHB1ENR |= RCC_AHB1ENR_GPIOAEN | RCC_AHB1ENR_GPIOCEN;
     RCC->APB2ENR |= RCC_APB2ENR_ADC1EN;
 
-    /*
-     * 4. ADC common prescaler.
-     * ADCPRE bits in ADC->CCR.
-     * 00 = PCLK2 / 2
-     * 01 = PCLK2 / 4
-     * 10 = PCLK2 / 6
-     * 11 = PCLK2 / 8
-     *
-     * Use /4 or /6 if your PCLK2 is high.
-     */
+    volatile uint32_t dummy;
+    dummy = RCC->AHB1ENR;
+    dummy = RCC->APB2ENR;
+    (void)dummy;
+
+    // PA4 analog mode, no pull
+    GPIOA->MODER &= ~(3U << (4U * 2U));
+    GPIOA->MODER |=  (3U << (4U * 2U));
+    GPIOA->PUPDR &= ~(3U << (4U * 2U));
+
+    // PC0 and PC1 analog mode, no pull
+    GPIOC->MODER &= ~((3U << (0U * 2U)) |
+                      (3U << (1U * 2U)));
+
+    GPIOC->MODER |=  ((3U << (0U * 2U)) |
+                      (3U << (1U * 2U)));
+
+    GPIOC->PUPDR &= ~((3U << (0U * 2U)) |
+                      (3U << (1U * 2U)));
+
+    // ADC common prescaler: ADCPRE = 01 means PCLK2 / 4.
+    // With current 16 MHz HSI/PCLK2 setup, ADC clock = 4 MHz.
     ADC->CCR &= ~(3U << 16);
-    ADC->CCR |=  (1U << 16);   // PCLK2 / 4
+    ADC->CCR |=  (1U << 16);
 
-    /*
-     * 5. ADC1 configuration.
-     *
-     * 12-bit resolution by default.
-     * Enable scan mode because we are converting 3 channels.
-     */
+    // Reset ADC1 control/configuration registers used here
     ADC1->CR1 = 0;
-    ADC1->CR1 |= ADC_CR1_SCAN;
-
-    /*
-     * Right-aligned data, single conversion mode for now.
-     */
     ADC1->CR2 = 0;
 
-    /*
-     * 6. Set number of conversions in regular sequence.
-     *
-     * L[3:0] in SQR1 stores number of conversions minus 1.
-     * For 3 conversions, L = 2.
-     */
+    // Scan mode: one software trigger converts all three regular channels
+    ADC1->CR1 |= ADC_CR1_SCAN;
+
+    // EOCS = EOC flag after each channel conversion
+    // This lets adc_current_read_all() read DR once per channel.
+    ADC1->CR2 |= ADC_CR2_EOCS;
+
+    // Regular sequence length = 3 conversions, encoded as N - 1
     ADC1->SQR1 &= ~(0xFU << 20);
     ADC1->SQR1 |=  (2U << 20);
 
-    /*
-     * 7. Set regular conversion sequence:
-     *
-     * SQ1 = channel 0
-     * SQ2 = channel 1
-     * SQ3 = channel 4
-     */
+    // Regular conversion sequence:
+    //   SQ1 = ADC channel 4  / PA4
+    //   SQ2 = ADC channel 10 / PC0
+    //   SQ3 = ADC channel 11 / PC1
     ADC1->SQR3 = 0;
-    ADC1->SQR3 |= (0U << 0);    // SQ1 = ADC channel 0, PA0
-    ADC1->SQR3 |= (1U << 5);    // SQ2 = ADC channel 1, PA1
-    ADC1->SQR3 |= (4U << 10);   // SQ3 = ADC channel 4, PA4
+    ADC1->SQR3 |= (4U  << 0);
+    ADC1->SQR3 |= (10U << 5);
+    ADC1->SQR3 |= (11U << 10);
 
-    /*
-     * 8. Set sample time.
-     *
-     * Because the ACS712 output may go through a resistor divider/filter,
-     * use a longer sample time.
-     *
-     * For channels 0, 1, and 4, use SMPR2.
-     * 000 = 3 cycles
-     * 001 = 15 cycles
-     * 010 = 28 cycles
-     * 011 = 56 cycles
-     * 100 = 84 cycles
-     * 101 = 112 cycles
-     * 110 = 144 cycles
-     * 111 = 480 cycles
-     */
-    ADC1->SMPR2 &= ~((7U << (0U * 3U)) |    // clear channel 0
-                     (7U << (1U * 3U)) |    // clear channel 1
-                     (7U << (4U * 3U)));    // clear channel 4
+    // Sample time = 84 cycles for channels 4, 10, and 11.
+    // Channel 4 is in SMPR2. Channels 10 and 11 are in SMPR1.
 
-    ADC1->SMPR2 |=  ((4U << (0U * 3U)) |   // channel 0: 84 cycles
-                     (4U << (1U * 3U)) |   // channel 1: 84 cycles
-                     (4U << (4U * 3U)));   // channel 4: 84 cycles
+    ADC1->SMPR2 &= ~(7U << (4U * 3U));
+    ADC1->SMPR2 |=  (4U << (4U * 3U));
 
-    /*
-     * 9. Enable ADC1.
-     */
+    ADC1->SMPR1 &= ~((7U << ((10U - 10U) * 3U)) |
+                     (7U << ((11U - 10U) * 3U)));
+
+    ADC1->SMPR1 |=  ((4U << ((10U - 10U) * 3U)) |
+                     (4U << ((11U - 10U) * 3U)));
+
+    // Enable ADC1
     ADC1->CR2 |= ADC_CR2_ADON;
+
+    // Short stabilization delay after ADC enable
+    delay(1000);
 }
 
-void adc_current_calibrate_zero(void)
+
+// -----------------------------------------------------------------------------
+// Calibrate ACS712 zero-current offsets.
+//
+// Run this while the motor current is zero. The ACS712 output should be near
+// VCC/2, but the exact value varies sensor-to-sensor, so calibration is better
+// than hard-coding 2.5 V.
+// -----------------------------------------------------------------------------
+static void adc_current_calibrate_zero(void)
 {
-    uint32_t sum_a = 0;
-    uint32_t sum_b = 0;
-    uint32_t sum_c = 0;
+    uint64_t sum_a = 0;
+    uint64_t sum_b = 0;
+    uint64_t sum_c = 0;
+
+    /*
+     * Throw away a few initial reads in case the ADC/sensor output
+     * has not fully settled yet.
+     */
+    for (uint32_t i = 0; i < 20U; i++)
+    {
+        adc_current_read_all();
+    }
 
     for (uint32_t i = 0; i < CURRENT_ZERO_CAL_SAMPLES; i++)
     {
@@ -640,12 +694,147 @@ void adc_current_calibrate_zero(void)
         sum_c += adc_current_c_raw;
     }
 
-    current_a_zero_voltage = adc_raw_to_voltage(sum_a / CURRENT_ZERO_CAL_SAMPLES);
-    current_b_zero_voltage = adc_raw_to_voltage(sum_b / CURRENT_ZERO_CAL_SAMPLES);
-    current_c_zero_voltage = adc_raw_to_voltage(sum_c / CURRENT_ZERO_CAL_SAMPLES);
+    uint16_t zero_a_raw = (uint16_t)(sum_a / CURRENT_ZERO_CAL_SAMPLES);
+    uint16_t zero_b_raw = (uint16_t)(sum_b / CURRENT_ZERO_CAL_SAMPLES);
+    uint16_t zero_c_raw = (uint16_t)(sum_c / CURRENT_ZERO_CAL_SAMPLES);
+
+    current_a_zero_voltage = adc_raw_to_voltage(zero_a_raw);
+    current_b_zero_voltage = adc_raw_to_voltage(zero_b_raw);
+    current_c_zero_voltage = adc_raw_to_voltage(zero_c_raw);
 }
 
 
+// -----------------------------------------------------------------------------
+// Read one ADC value from the active conversion sequence.
+// -----------------------------------------------------------------------------
+static uint16_t adc_read_sequence_value(void)
+{
+    while (!(ADC1->SR & ADC_SR_EOC))
+    {
+    }
+
+    return (uint16_t)ADC1->DR;
+}
+
+
+// -----------------------------------------------------------------------------
+// Trigger one 3-channel ADC sequence and store raw current readings.
+// -----------------------------------------------------------------------------
+static void adc_current_read_all(void)
+{
+    // Clear stale status flags before a fresh software-triggered read
+    ADC1->SR = 0;
+
+    // Start regular conversion sequence
+    ADC1->CR2 |= ADC_CR2_SWSTART;
+
+    adc_current_a_raw = adc_read_sequence_value();
+    adc_current_b_raw = adc_read_sequence_value();
+    adc_current_c_raw = adc_read_sequence_value();
+}
+
+
+static float adc_raw_to_voltage(uint16_t raw)
+{
+    return ((float)raw * ADC_REFERENCE_VOLTAGE) / (float)ADC_MAX_COUNTS;
+}
+
+
+static float adc_raw_to_current_amps_with_offset(uint16_t raw, float zero_voltage)
+{
+    float voltage = adc_raw_to_voltage(raw);
+    return (voltage - zero_voltage) / ACS712_SENSITIVITY;
+}
+
+
+// -----------------------------------------------------------------------------
+// SysTick setup:
+//   Core clock = 16 MHz
+//   Reload = 16000 - 1
+//   Tick rate = 1 kHz
+// -----------------------------------------------------------------------------
+static void systick_1khz_init(void)
+{
+    SysTick->LOAD = SYSTICK_1KHZ_RELOAD - 1U;
+    SysTick->VAL  = 0U;
+
+    // Use core clock, enable SysTick, no interrupt.
+    // COUNTFLAG is polled in systick_1ms_elapsed().
+    SysTick->CTRL = SysTick_CTRL_CLKSOURCE_Msk | SysTick_CTRL_ENABLE_Msk;
+}
+
+
+static uint8_t systick_1ms_elapsed(void)
+{
+    // COUNTFLAG is set when SysTick counts from 1 to 0.
+    // Reading CTRL clears COUNTFLAG.
+    return ((SysTick->CTRL & SysTick_CTRL_COUNTFLAG_Msk) != 0U) ? 1U : 0U;
+}
+
+
+// -----------------------------------------------------------------------------
+// Print current values in milliamps.
+//
+// Using integer milliamps avoids requiring printf floating-point support.
+// Printed every 20th 1 kHz sample, so output rate is 50 Hz.
+// -----------------------------------------------------------------------------
+static void print_current_values_ma(float current_a, float current_b, float current_c)
+{
+    char value_string[16];
+
+    int32_t current_a_ma = (int32_t)(current_a * 1000.0f);
+    int32_t current_b_ma = (int32_t)(current_b * 1000.0f);
+    int32_t current_c_ma = (int32_t)(current_c * 1000.0f);
+
+    debug_print("IA=");
+    int32_to_string(current_a_ma, value_string, sizeof(value_string));
+    debug_print(value_string);
+    debug_print(" mA, IB=");
+
+    int32_to_string(current_b_ma, value_string, sizeof(value_string));
+    debug_print(value_string);
+    debug_print(" mA, IC=");
+
+    int32_to_string(current_c_ma, value_string, sizeof(value_string));
+    debug_print(value_string);
+    debug_print(" mA, ENC=");
+
+    int32_to_string((int32_t)TIM2->CNT, value_string, sizeof(value_string));
+    debug_print(value_string);
+    debug_print("\r\n");
+}
+
+
+static void print_adc_raw_and_offsets(void)
+{
+    char value_string[16];
+
+    debug_print("RAW IA=");
+    int32_to_string((int32_t)adc_current_a_raw, value_string, sizeof(value_string));
+    debug_print(value_string);
+
+    debug_print(", IB=");
+    int32_to_string((int32_t)adc_current_b_raw, value_string, sizeof(value_string));
+    debug_print(value_string);
+
+    debug_print(", IC=");
+    int32_to_string((int32_t)adc_current_c_raw, value_string, sizeof(value_string));
+    debug_print(value_string);
+
+    debug_print(" | ZERO mV IA=");
+    int32_to_string((int32_t)(current_a_zero_voltage * 1000.0f), value_string, sizeof(value_string));
+    debug_print(value_string);
+
+    debug_print(", IB=");
+    int32_to_string((int32_t)(current_b_zero_voltage * 1000.0f), value_string, sizeof(value_string));
+    debug_print(value_string);
+
+    debug_print(", IC=");
+    int32_to_string((int32_t)(current_c_zero_voltage * 1000.0f), value_string, sizeof(value_string));
+    debug_print(value_string);
+
+    debug_print("\r\n");
+}
 
 
 // -----------------------------------------------------------------------------
