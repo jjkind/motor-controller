@@ -35,12 +35,20 @@
 #define TIM1_PWM_ARR                400U
 #define TIM1_PWM_50_PERCENT         (TIM1_PWM_ARR / 2U) 
 #define TIM1_DEADTIME_TICKS         16U  // ~1 us at 16 MHz timer clock
+#define ADC_MAX_COUNTS              4095U
+#define ADC_REFERENCE_VOLTAGE       3.3f
+#define ACS712_ZERO_CURRENT_VOLTAGE 2.5f
+#define ACS712_SENSITIVITY          0.185f  // 185mV/A for ACS712ELC-5A
+#define CURRENT_ZERO_CAL_SAMPLES    1000U
+
 
 static void clock_init(void);
 static void gpio_init(void);
 static void tim1_pwm_gpio_init(void);
 static void tim1_pwm_init(void);
 static void encoder_tim2_init(void);
+static void adc_current_init(void);
+static void adc_current_calibrate_zero(void);
 static void uart2_init(void);
 static void debug_print(const char *msg);
 static void delay(volatile uint32_t count);
@@ -54,6 +62,10 @@ int main(void)
 
     tim1_pwm_gpio_init();
     tim1_pwm_init();
+
+    adc_current_init();
+    adc_current_calibrate_zero();
+
     encoder_tim2_init();
 
     uart2_init();
@@ -492,6 +504,148 @@ static void encoder_tim2_init(void)
     // Enable TIM2 counter
     TIM2->CR1 |= TIM_CR1_CEN;
 }
+
+
+// -----------------------------------------------------------------------------
+// ADC Setup for current sensing using ACS712 on PA0, PA1, and PA4:
+// -----------------------------------------------------------------------------
+void adc_current_init(void)
+{
+    /*
+     * Using:
+     * PA0 -> ADC1_IN0
+     * PA1 -> ADC1_IN1
+     * PA4 -> ADC1_IN4
+     */
+
+    /*
+     * 1. Enable GPIOA clock.
+     */
+    RCC->AHB1ENR |= RCC_AHB1ENR_GPIOAEN;
+
+    /*
+     * 2. Set PA0, PA1, PA4 to analog mode.
+     * MODER bits:
+     * 00 = input
+     * 01 = output
+     * 10 = alternate function
+     * 11 = analog
+     */
+    GPIOA->MODER |= (3U << (0U * 2U));   // PA0 analog
+    GPIOA->MODER |= (3U << (1U * 2U));   // PA1 analog
+    GPIOA->MODER |= (3U << (4U * 2U));   // PA4 analog
+
+    /*
+     * Disable pull-up/pull-down on analog pins.
+     */
+    GPIOA->PUPDR &= ~(3U << (0U * 2U));
+    GPIOA->PUPDR &= ~(3U << (1U * 2U));
+    GPIOA->PUPDR &= ~(3U << (4U * 2U));
+
+    /*
+     * 3. Enable ADC1 clock.
+     */
+    RCC->APB2ENR |= RCC_APB2ENR_ADC1EN;
+
+    /*
+     * 4. ADC common prescaler.
+     * ADCPRE bits in ADC->CCR.
+     * 00 = PCLK2 / 2
+     * 01 = PCLK2 / 4
+     * 10 = PCLK2 / 6
+     * 11 = PCLK2 / 8
+     *
+     * Use /4 or /6 if your PCLK2 is high.
+     */
+    ADC->CCR &= ~(3U << 16);
+    ADC->CCR |=  (1U << 16);   // PCLK2 / 4
+
+    /*
+     * 5. ADC1 configuration.
+     *
+     * 12-bit resolution by default.
+     * Enable scan mode because we are converting 3 channels.
+     */
+    ADC1->CR1 = 0;
+    ADC1->CR1 |= ADC_CR1_SCAN;
+
+    /*
+     * Right-aligned data, single conversion mode for now.
+     */
+    ADC1->CR2 = 0;
+
+    /*
+     * 6. Set number of conversions in regular sequence.
+     *
+     * L[3:0] in SQR1 stores number of conversions minus 1.
+     * For 3 conversions, L = 2.
+     */
+    ADC1->SQR1 &= ~(0xFU << 20);
+    ADC1->SQR1 |=  (2U << 20);
+
+    /*
+     * 7. Set regular conversion sequence:
+     *
+     * SQ1 = channel 0
+     * SQ2 = channel 1
+     * SQ3 = channel 4
+     */
+    ADC1->SQR3 = 0;
+    ADC1->SQR3 |= (0U << 0);    // SQ1 = ADC channel 0, PA0
+    ADC1->SQR3 |= (1U << 5);    // SQ2 = ADC channel 1, PA1
+    ADC1->SQR3 |= (4U << 10);   // SQ3 = ADC channel 4, PA4
+
+    /*
+     * 8. Set sample time.
+     *
+     * Because the ACS712 output may go through a resistor divider/filter,
+     * use a longer sample time.
+     *
+     * For channels 0, 1, and 4, use SMPR2.
+     * 000 = 3 cycles
+     * 001 = 15 cycles
+     * 010 = 28 cycles
+     * 011 = 56 cycles
+     * 100 = 84 cycles
+     * 101 = 112 cycles
+     * 110 = 144 cycles
+     * 111 = 480 cycles
+     */
+    ADC1->SMPR2 &= ~((7U << (0U * 3U)) |    // clear channel 0
+                     (7U << (1U * 3U)) |    // clear channel 1
+                     (7U << (4U * 3U)));    // clear channel 4
+
+    ADC1->SMPR2 |=  ((4U << (0U * 3U)) |   // channel 0: 84 cycles
+                     (4U << (1U * 3U)) |   // channel 1: 84 cycles
+                     (4U << (4U * 3U)));   // channel 4: 84 cycles
+
+    /*
+     * 9. Enable ADC1.
+     */
+    ADC1->CR2 |= ADC_CR2_ADON;
+}
+
+void adc_current_calibrate_zero(void)
+{
+    uint32_t sum_a = 0;
+    uint32_t sum_b = 0;
+    uint32_t sum_c = 0;
+
+    for (uint32_t i = 0; i < CURRENT_ZERO_CAL_SAMPLES; i++)
+    {
+        adc_current_read_all();
+
+        sum_a += adc_current_a_raw;
+        sum_b += adc_current_b_raw;
+        sum_c += adc_current_c_raw;
+    }
+
+    current_a_zero_voltage = adc_raw_to_voltage(sum_a / CURRENT_ZERO_CAL_SAMPLES);
+    current_b_zero_voltage = adc_raw_to_voltage(sum_b / CURRENT_ZERO_CAL_SAMPLES);
+    current_c_zero_voltage = adc_raw_to_voltage(sum_c / CURRENT_ZERO_CAL_SAMPLES);
+}
+
+
 
 
 // -----------------------------------------------------------------------------
