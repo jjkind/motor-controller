@@ -51,7 +51,9 @@
 #define ACS712_SENSITIVITY          0.185f  // 185mV/A for ACS712ELC-5A
 
 #define CURRENT_ZERO_CAL_SAMPLES    1000U
-#define CURRENT_PRINT_DECIMATION    20U
+#define CURRENT_PRINT_DECIMATION    1000U // Changed from 20U
+
+#define CURRENT_FILTER_ALPHA        0.239f  // Exponential moving average filter alpha
 
 #define SYSTICK_1KHZ_RELOAD         16000U  // 16 MHz / 1000 = 16000 ticks for 1 kHz
 
@@ -69,6 +71,7 @@ static void adc_current_calibrate_zero(void);
 static void adc_current_read_all(void);
 static uint16_t adc_read_sequence_value(void);
 static float adc_raw_to_voltage(uint16_t raw);
+static float low_pass_filter(float previous, float input);
 static float adc_raw_to_current_amps_with_offset(uint16_t raw, float zero_voltage);
 static void print_adc_raw_and_offsets(void);
 
@@ -92,6 +95,10 @@ static volatile uint16_t adc_current_c_raw = 0;
 static float current_a_zero_voltage = 0.0f;
 static float current_b_zero_voltage = 0.0f;
 static float current_c_zero_voltage = 0.0f;
+
+static float current_a_filtered = 0.0f;
+static float current_b_filtered = 0.0f;
+static float current_c_filtered = 0.0f;
 
 int main(void)
 {
@@ -124,6 +131,13 @@ int main(void)
     debug_print("Current zero calibration complete\r\n");
 
     adc_current_read_all();
+
+    // Avoids filtered values starting from zero and slowly ramping to the real offset
+    current_a_filtered = adc_raw_to_current_amps_with_offset(adc_current_a_raw, current_a_zero_voltage);
+    current_b_filtered = adc_raw_to_current_amps_with_offset(adc_current_b_raw, current_b_zero_voltage);
+    current_c_filtered = adc_raw_to_current_amps_with_offset(adc_current_c_raw, current_c_zero_voltage);
+
+
     print_adc_raw_and_offsets();
 
     systick_1khz_init();
@@ -159,15 +173,19 @@ int main(void)
             float current_b = adc_raw_to_current_amps_with_offset(adc_current_b_raw, current_b_zero_voltage);
             float current_c = adc_raw_to_current_amps_with_offset(adc_current_c_raw, current_c_zero_voltage);
 
+            current_a_filtered = low_pass_filter(current_a_filtered, current_a);
+            current_b_filtered = low_pass_filter(current_b_filtered, current_b);
+            current_c_filtered = low_pass_filter(current_c_filtered, current_c);
+
             current_sample_count++;
 
             if ((current_sample_count % CURRENT_PRINT_DECIMATION) == 0U)
             {
-                print_current_values_ma(current_a, current_b, current_c);
+                print_current_values_ma(current_a_filtered, current_b_filtered, current_c_filtered);
             }
         }
 
-        delay(1000000);
+        //delay(1000000);
     }
 }
 
@@ -737,6 +755,11 @@ static void adc_current_read_all(void)
 static float adc_raw_to_voltage(uint16_t raw)
 {
     return ((float)raw * ADC_REFERENCE_VOLTAGE) / (float)ADC_MAX_COUNTS;
+}
+
+static float low_pass_filter(float previous, float input)
+{
+    return (previous + CURRENT_FILTER_ALPHA * (input - previous));
 }
 
 
