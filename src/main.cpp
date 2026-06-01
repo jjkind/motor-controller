@@ -47,8 +47,8 @@
 
 #define ADC_MAX_COUNTS              4095U
 #define ADC_REFERENCE_VOLTAGE       3.3f
-#define ACS712_ZERO_CURRENT_VOLTAGE 1.16f   // Changed to 1.599f from 2.5f with no voltage divider, this represents R1=38kOhm and R2=67.4kOhm
-#define ACS712_SENSITIVITY          0.185f  // 185mV/A for ACS712ELC-5A
+#define ACS712_ZERO_CURRENT_VOLTAGE 1.599f   // //1.16f Changed to 1.599f from 2.5f with no voltage divider, this represents R1=38kOhm and R2=67.4kOhm
+#define ACS712_SENSITIVITY          0.1183f  // 185mV/A for ACS712ELC-5A //0.1183 represents factor with voltage divider
 
 #define CURRENT_ZERO_CAL_SAMPLES    10000U // From 1000Uß
 #define CURRENT_PRINT_DECIMATION    1000U // Changed from 20U
