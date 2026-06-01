@@ -77,6 +77,8 @@ static void print_adc_raw_and_offsets(void);
 
 static void systick_1khz_init(void);
 static uint8_t systick_1ms_elapsed(void);
+static void delay_ms(uint32_t ms);
+static void print_current_zero_voltages(void);
 
 static void print_current_values_ma(float current_a, float current_b, float current_c);
 
@@ -130,6 +132,14 @@ int main(void)
     adc_current_calibrate_zero();
     debug_print("Current zero calibration complete\r\n");
 
+    debug_print("Waiting 5 seconds before printing zero-current voltages...\r\n");
+    delay_ms(5000U);
+
+    print_current_zero_voltages();
+
+    debug_print("Waiting another 5 seconds before starting current loop...\r\n");
+    delay_ms(5000U);
+
     adc_current_read_all();
 
     // Avoids filtered values starting from zero and slowly ramping to the real offset
@@ -140,7 +150,7 @@ int main(void)
 
     print_adc_raw_and_offsets();
 
-    systick_1khz_init();
+    //systick_1khz_init();  // Removing so it does not initialize twice
 
     uint32_t current_sample_count = 0;
 
@@ -795,6 +805,37 @@ static uint8_t systick_1ms_elapsed(void)
     return ((SysTick->CTRL & SysTick_CTRL_COUNTFLAG_Msk) != 0U) ? 1U : 0U;
 }
 
+
+static void delay_ms(uint32_t ms)
+{
+    while (ms > 0U)
+    {
+        if (systick_1ms_elapsed())
+        {
+            ms--;
+        }
+    }
+}
+
+
+static void print_current_zero_voltages(void)
+{
+    char value_string[16];
+
+    debug_print("Current zero voltages: IA=");
+
+    int32_to_string((int32_t)(current_a_zero_voltage * 1000.0f), value_string, sizeof(value_string));
+    debug_print(value_string);
+    debug_print(" mV, IB=");
+
+    int32_to_string((int32_t)(current_b_zero_voltage * 1000.0f), value_string, sizeof(value_string));
+    debug_print(value_string);
+    debug_print(" mV, IC=");
+
+    int32_to_string((int32_t)(current_c_zero_voltage * 1000.0f), value_string, sizeof(value_string));
+    debug_print(value_string);
+    debug_print(" mV\r\n");
+}
 
 // -----------------------------------------------------------------------------
 // Print current values in milliamps.
