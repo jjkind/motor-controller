@@ -1,0 +1,19 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Upload, Monitor, and Log to File",
+            "type": "shell",
+            "command": "mkdir -p logs && pio run -t upload && pio device monitor -b 115200 | tee logs/current_log.csv",
+            "group": "build",
+            "problemMatcher": [],
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": true,
+                "panel": "dedicated",
+                "clear": true
+            }
+        }
+    ]
+}
