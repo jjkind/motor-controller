@@ -47,13 +47,13 @@
 
 #define ADC_MAX_COUNTS              4095U
 #define ADC_REFERENCE_VOLTAGE       3.3f
-#define ACS712_ZERO_CURRENT_VOLTAGE 2.5f
+#define ACS712_ZERO_CURRENT_VOLTAGE 1.16f   // Changed to 1.599f from 2.5f with no voltage divider, this represents R1=38kOhm and R2=67.4kOhm
 #define ACS712_SENSITIVITY          0.185f  // 185mV/A for ACS712ELC-5A
 
-#define CURRENT_ZERO_CAL_SAMPLES    1000U
+#define CURRENT_ZERO_CAL_SAMPLES    10000U // From 1000Uß
 #define CURRENT_PRINT_DECIMATION    1000U // Changed from 20U
 
-#define CURRENT_FILTER_ALPHA        0.239f  // Exponential moving average filter alpha
+#define CURRENT_FILTER_ALPHA        0.05f  // Exponential moving average filter alpha (0.239)
 
 #define SYSTICK_1KHZ_RELOAD         16000U  // 16 MHz / 1000 = 16000 ticks for 1 kHz
 
@@ -719,6 +719,7 @@ static void adc_current_calibrate_zero(void)
     current_a_zero_voltage = adc_raw_to_voltage(zero_a_raw);
     current_b_zero_voltage = adc_raw_to_voltage(zero_b_raw);
     current_c_zero_voltage = adc_raw_to_voltage(zero_c_raw);
+
 }
 
 
