@@ -53,7 +53,7 @@
 #define CURRENT_ZERO_CAL_SAMPLES    10000U // From 1000Uß
 #define CURRENT_PRINT_DECIMATION    1000U // Changed from 20U
 
-#define CURRENT_FILTER_ALPHA        0.05f  // Exponential moving average filter alpha (0.239)
+#define CURRENT_FILTER_ALPHA        0.239f  // Exponential moving average filter alpha (0.239)
 
 #define SYSTICK_1KHZ_RELOAD         16000U  // 16 MHz / 1000 = 16000 ticks for 1 kHz
 
@@ -661,13 +661,16 @@ static void adc_current_init(void)
     // Channel 4 is in SMPR2. Channels 10 and 11 are in SMPR1.
 
     ADC1->SMPR2 &= ~(7U << (4U * 3U));
-    ADC1->SMPR2 |=  (4U << (4U * 3U));
+    //ADC1->SMPR2 |=  (4U << (4U * 3U)); // 84 cycles for current reading
+    ADC1->SMPR2 |= (6U << (4U * 3U)); // 144 cycles for current reading, more stable but slower
 
     ADC1->SMPR1 &= ~((7U << ((10U - 10U) * 3U)) |
                      (7U << ((11U - 10U) * 3U)));
 
-    ADC1->SMPR1 |=  ((4U << ((10U - 10U) * 3U)) |
-                     (4U << ((11U - 10U) * 3U)));
+    // ADC1->SMPR1 |=  ((4U << ((10U - 10U) * 3U)) |
+    //                  (4U << ((11U - 10U) * 3U)));
+    ADC1->SMPR1 |=  ((6U << ((10U - 10U) * 3U)) |
+                    (6U << ((11U - 10U) * 3U)));  // 144 cycles for current reading, more stable but slower
 
     // Enable ADC1
     ADC1->CR2 |= ADC_CR2_ADON;
@@ -738,7 +741,7 @@ static uint16_t adc_read_sequence_value(void)
 static void adc_current_read_all(void)
 {
     // Clear stale status flags before a fresh software-triggered read
-    ADC1->SR = 0;
+    // ADC1->SR = 0;
 
     // Start regular conversion sequence
     ADC1->CR2 |= ADC_CR2_SWSTART;
