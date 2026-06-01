@@ -112,13 +112,15 @@ int main(void)
     tim1_pwm_gpio_init();
     tim1_pwm_init();
 
-    adc_current_init();
-    adc_current_calibrate_zero();
-
     encoder_tim2_init();
 
     adc_current_init();
 
+    /*
+     * SysTick must be initialized before using delay_ms().
+     * It is also used later for the 1 kHz current sampling loop.
+     */
+    systick_1khz_init();
 
     debug_print("Nucleo F446RE Board Test\r\n");
     debug_print("TIM1 complementary PWM configured\r\n");
@@ -140,41 +142,27 @@ int main(void)
     debug_print("Waiting another 5 seconds before starting current loop...\r\n");
     delay_ms(5000U);
 
+    /*
+     * Take one current sample and initialize the filtered current values.
+     * This prevents the filter from starting at 0 and slowly ramping toward
+     * the actual measured current.
+     */
     adc_current_read_all();
 
-    // Avoids filtered values starting from zero and slowly ramping to the real offset
     current_a_filtered = adc_raw_to_current_amps_with_offset(adc_current_a_raw, current_a_zero_voltage);
     current_b_filtered = adc_raw_to_current_amps_with_offset(adc_current_b_raw, current_b_zero_voltage);
     current_c_filtered = adc_raw_to_current_amps_with_offset(adc_current_c_raw, current_c_zero_voltage);
 
-
     print_adc_raw_and_offsets();
-
-    //systick_1khz_init();  // Removing so it does not initialize twice
 
     uint32_t current_sample_count = 0;
 
-    int32_t previous_encoder_count = (int32_t)TIM2->CNT;
-
     while (1)
     {
-        int32_t encoder_count = (int32_t)TIM2->CNT;
-
-        // Check if the encoder count has changed since the last print and print if it has
-        if (encoder_count != previous_encoder_count)
-        {
-            char count_string[16];
-
-            int32_to_string(encoder_count, count_string, sizeof(count_string));
-
-            debug_print("Encoder count: ");
-            debug_print(count_string);
-            debug_print("\r\n");
-
-            previous_encoder_count = encoder_count;
-        }
-
-        // Read current values every 1ms and print every 20ms
+        /*
+         * Current sampling runs at 1 kHz.
+         * SysTick fires every 1 ms.
+         */
         if (systick_1ms_elapsed())
         {
             adc_current_read_all();
@@ -194,8 +182,6 @@ int main(void)
                 print_current_values_ma(current_a_filtered, current_b_filtered, current_c_filtered);
             }
         }
-
-        //delay(1000000);
     }
 }
 
