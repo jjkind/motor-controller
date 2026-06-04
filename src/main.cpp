@@ -53,7 +53,7 @@
 #define CURRENT_ZERO_CAL_SAMPLES    10000U // From 1000Uß
 #define CURRENT_PRINT_DECIMATION    1000U // Changed from 20U
 
-#define CURRENT_FILTER_ALPHA        0.239f  // Exponential moving average filter alpha (0.239)
+#define CURRENT_FILTER_ALPHA        0.1f  // Exponential moving average filter alpha (0.239)
 
 #define SYSTICK_1KHZ_RELOAD         16000U  // 16 MHz / 1000 = 16000 ticks for 1 kHz
 
