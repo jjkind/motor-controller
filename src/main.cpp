@@ -137,7 +137,7 @@ int main(void)
     //debug_print("Waiting 5 seconds before printing zero-current voltages...\r\n");
     delay_ms(5000U);
 
-    print_current_zero_voltages();
+    // print_current_zero_voltages();
 
     //debug_print("Waiting another 5 seconds before starting current loop...\r\n");
     delay_ms(5000U);
