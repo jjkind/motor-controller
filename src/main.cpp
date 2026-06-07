@@ -122,24 +122,24 @@ int main(void)
      */
     systick_1khz_init();
 
-    debug_print("Nucleo F446RE Board Test\r\n");
-    debug_print("TIM1 complementary PWM configured\r\n");
-    debug_print("High-side: PA8/PA9/PA10\r\n");
-    debug_print("Low-side:  PA7/PB0/PB1\r\n");
-    debug_print("PWM: 20 kHz center-aligned, 50 percent duty, dead time enabled\r\n");
-    debug_print("Encoder inputs: PA0=TIM2_CH1, PA1=TIM2_CH2\r\n");
-    debug_print("ADC current inputs: PA4=IA, PC0=IB, PC1=IC\r\n");
+    // debug_print("Nucleo F446RE Board Test\r\n");
+    // debug_print("TIM1 complementary PWM configured\r\n");
+    // debug_print("High-side: PA8/PA9/PA10\r\n");
+    // debug_print("Low-side:  PA7/PB0/PB1\r\n");
+    // debug_print("PWM: 20 kHz center-aligned, 50 percent duty, dead time enabled\r\n");
+    // debug_print("Encoder inputs: PA0=TIM2_CH1, PA1=TIM2_CH2\r\n");
+    // debug_print("ADC current inputs: PA4=IA, PC0=IB, PC1=IC\r\n");
 
-    debug_print("Calibrating current zero offsets. Keep motor current at zero...\r\n");
+    //debug_print("Calibrating current zero offsets. Keep motor current at zero...\r\n");
     adc_current_calibrate_zero();
-    debug_print("Current zero calibration complete\r\n");
+    //debug_print("Current zero calibration complete\r\n");
 
-    debug_print("Waiting 5 seconds before printing zero-current voltages...\r\n");
+    //debug_print("Waiting 5 seconds before printing zero-current voltages...\r\n");
     delay_ms(5000U);
 
     print_current_zero_voltages();
 
-    debug_print("Waiting another 5 seconds before starting current loop...\r\n");
+    //debug_print("Waiting another 5 seconds before starting current loop...\r\n");
     delay_ms(5000U);
 
     /*
@@ -153,7 +153,7 @@ int main(void)
     current_b_filtered = adc_raw_to_current_amps_with_offset(adc_current_b_raw, current_b_zero_voltage);
     current_c_filtered = adc_raw_to_current_amps_with_offset(adc_current_c_raw, current_c_zero_voltage);
 
-    print_adc_raw_and_offsets();
+    // print_adc_raw_and_offsets();
 
     uint32_t current_sample_count = 0;
 
@@ -179,7 +179,8 @@ int main(void)
 
             if ((current_sample_count % CURRENT_PRINT_DECIMATION) == 0U)
             {
-                print_current_values_ma(current_a_filtered, current_b_filtered, current_c_filtered);
+                //print_current_values_ma(current_a_filtered, current_b_filtered, current_c_filtered);
+                print_current_values_ma(current_a, current_b, current_c);
             }
         }
     }
@@ -840,18 +841,20 @@ static void print_current_values_ma(float current_a, float current_b, float curr
     int32_t current_b_ma = (int32_t)(current_b * 1000.0f);
     int32_t current_c_ma = (int32_t)(current_c * 1000.0f);
 
-    debug_print("IA=");
+    // debug_print("IA=");
     int32_to_string(current_a_ma, value_string, sizeof(value_string));
     debug_print(value_string);
-    debug_print(" mA, IB=");
+    debug_print(";");
+    // debug_print(" mA, IB=");
 
     int32_to_string(current_b_ma, value_string, sizeof(value_string));
     debug_print(value_string);
-    debug_print(" mA, IC=");
+    debug_print(";");
+    // debug_print(" mA, IC=");
 
     int32_to_string(current_c_ma, value_string, sizeof(value_string));
     debug_print(value_string);
-    debug_print(" mA, ENC=");
+    // debug_print(" mA, ENC=");
 
     int32_to_string((int32_t)TIM2->CNT, value_string, sizeof(value_string));
     debug_print(value_string);
