@@ -54,7 +54,7 @@
 #define ACS712_ZERO_CURRENT_VOLTAGE 1.599f   // //1.16f Changed to 1.599f from 2.5f with no voltage divider, this represents R1=38kOhm and R2=67.4kOhm
 #define ACS712_SENSITIVITY          0.1183f  // 185mV/A for ACS712ELC-5A //0.1183 represents factor with voltage divider
 
-#define CURRENT_ZERO_CAL_SAMPLES    10000U // From 1000Uß
+#define CURRENT_ZERO_CAL_SAMPLES    2000U // From 1000Uß
 // #define CURRENT_FILTER_ALPHA        0.1f  // Exponential moving average filter alpha (0.239)
 
 /*
@@ -70,7 +70,7 @@
  * This decimates the 1 kHz filtered-current stream for UART printing.
  * 1000 means print once per second.
  */
-#define CURRENT_PRINT_DECIMATION    1000U // 1 per second
+#define CURRENT_PRINT_DECIMATION    1U // 1 per milli-second
 
 /*
  * 2nd-order Butterworth low-pass IIR filter.
@@ -190,13 +190,13 @@ int main(void)
     // debug_print("ADC current inputs: PA4=IA, PC0=IB, PC1=IC\r\n");
 
     //debug_print("Calibrating current zero offsets. Keep motor current at zero...\r\n");
-    adc_current_calibrate_zero();
+    adc_current_calibrate_zero(); 
     //debug_print("Current zero calibration complete\r\n");
 
     //debug_print("Waiting 5 seconds before printing zero-current voltages...\r\n");
     delay_ms(5000U);
 
-    print_current_zero_voltages();
+    // print_current_zero_voltages();
 
     //debug_print("Waiting another 5 seconds before starting current loop...\r\n");
     delay_ms(5000U);
@@ -875,7 +875,7 @@ static void adc_current_calibrate_zero(void)
      * Throw away a few initial reads in case the ADC/sensor output
      * has not fully settled yet. Note this can be made bigger.
      */
-    for (uint32_t i = 0; i < 20U; i++)
+    for (uint32_t i = 0; i < 100U; i++)
     {
         adc_current_read_all();
     }
@@ -1081,21 +1081,23 @@ static void print_current_values_ma(float current_a, float current_b, float curr
     int32_t current_b_ma = (int32_t)(current_b * 1000.0f);
     int32_t current_c_ma = (int32_t)(current_c * 1000.0f);
 
-    debug_print("IA=");
+    //debug_print("IA=");
     int32_to_string(current_a_ma, value_string, sizeof(value_string));
     debug_print(value_string);
-    debug_print(" mA, IB=");
+    debug_print(";");
+    //debug_print(" mA, IB=");
 
     int32_to_string(current_b_ma, value_string, sizeof(value_string));
     debug_print(value_string);
-    debug_print(" mA, IC=");
+    debug_print(";");
+    //debug_print(" mA, IC=");
 
     int32_to_string(current_c_ma, value_string, sizeof(value_string));
     debug_print(value_string);
-    debug_print(" mA, ENC=");
+    //debug_print(" mA, ENC=");
 
     int32_to_string((int32_t)TIM2->CNT, value_string, sizeof(value_string));
-    debug_print(value_string);
+    //debug_print(value_string);
     debug_print("\r\n");
 }
 
