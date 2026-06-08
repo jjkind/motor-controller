@@ -27,10 +27,10 @@
 //   Encoder B: PA1 = TIM2_CH2
 //
 // TIM1 setup:
-//   Timer clock:    16 MHz
+//   SYSCLK:         84 MHz
+//   TIM1 PWM ARR    2100 for 20 kHz PWM
 //   PWM mode:       center-aligned PWM mode 1
 //   PWM frequency:  20 kHz
-//   ARR:            400
 //   Initial duty:   50% on all three phases
 //   Dead time:      ~1 us using DTG = 16 at 16 MHz timer clock
 //
@@ -54,7 +54,7 @@
 #define ACS712_ZERO_CURRENT_VOLTAGE 1.599f   // //1.16f Changed to 1.599f from 2.5f with no voltage divider, this represents R1=38kOhm and R2=67.4kOhm
 #define ACS712_SENSITIVITY          0.1183f  // 185mV/A for ACS712ELC-5A //0.1183 represents factor with voltage divider
 
-#define CURRENT_ZERO_CAL_SAMPLES    2000U // From 1000Uß
+#define CURRENT_ZERO_CAL_SAMPLES    50U // From 1000Uß
 // #define CURRENT_FILTER_ALPHA        0.1f  // Exponential moving average filter alpha (0.239)
 
 /*
@@ -70,7 +70,7 @@
  * This decimates the 1 kHz filtered-current stream for UART printing.
  * 1000 means print once per second.
  */
-#define CURRENT_PRINT_DECIMATION    1U // 1 per milli-second
+#define CURRENT_PRINT_DECIMATION    10U // 1 per milli-second
 
 /*
  * 2nd-order Butterworth low-pass IIR filter.
@@ -875,7 +875,7 @@ static void adc_current_calibrate_zero(void)
      * Throw away a few initial reads in case the ADC/sensor output
      * has not fully settled yet. Note this can be made bigger.
      */
-    for (uint32_t i = 0; i < 100U; i++)
+    for (uint32_t i = 0; i < 50U; i++)
     {
         adc_current_read_all();
     }
