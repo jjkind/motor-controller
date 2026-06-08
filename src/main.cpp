@@ -54,7 +54,7 @@
 #define ACS712_ZERO_CURRENT_VOLTAGE 1.599f   // //1.16f Changed to 1.599f from 2.5f with no voltage divider, this represents R1=38kOhm and R2=67.4kOhm
 #define ACS712_SENSITIVITY          0.1183f  // 185mV/A for ACS712ELC-5A //0.1183 represents factor with voltage divider
 
-#define CURRENT_ZERO_CAL_SAMPLES    50U // From 1000Uß
+#define CURRENT_ZERO_CAL_SAMPLES    20000U // From 1000Uß
 // #define CURRENT_FILTER_ALPHA        0.1f  // Exponential moving average filter alpha (0.239)
 
 /*
@@ -62,7 +62,7 @@
  * Every 20 raw IA/IB/IC sample sets are averaged, producing a 1 kHz
  * averaged-current stream.
  */
-#define CURRENT_RAW_SAMPLE_RATE_HZ   20000U // 20kHz raw sample rate synchronized to PWM
+#define CURRENT_RAW_SAMPLE_RATE_HZ   80000U // 20kHz raw sample rate synchronized to PWM
 #define CURRENT_AVERAGE_BLOCK_SIZE   20U    // Number of raw samples to average for each printed/filtered current value
 #define CURRENT_FILTERED_RATE_HZ     (CURRENT_RAW_SAMPLE_RATE_HZ / CURRENT_AVERAGE_BLOCK_SIZE) // 1000 Hz after averaging
 
@@ -70,23 +70,26 @@
  * This decimates the 1 kHz filtered-current stream for UART printing.
  * 1000 means print once per second.
  */
-#define CURRENT_PRINT_DECIMATION    10U // 1 per milli-second
+#define CURRENT_PRINT_DECIMATION    20U // 1 per milli-second
 
 /*
- * 2nd-order Butterworth low-pass IIR filter.
+ * 5th-order Butterworth low-pass IIR filter.
  * Designed for:
  *   sample rate = 1000 Hz
- *   cutoff      = 10 Hz
- *
- * Difference equation:
- *   y[n] = b0*x[n] + b1*x[n-1] + b2*x[n-2]
- *        - a1*y[n-1] - a2*y[n-2]
+ *   cutoff      = 20 Hz
  */
-#define CURRENT_IIR_B0              0.000944691843f
-#define CURRENT_IIR_B1              0.001889383686f
-#define CURRENT_IIR_B2              0.000944691843f
-#define CURRENT_IIR_A1             -1.911197067427f
-#define CURRENT_IIR_A2              0.914975834801f
+#define CURRENT_IIR_B0  0.000000200242f
+#define CURRENT_IIR_B1  0.000001001210f
+#define CURRENT_IIR_B2  0.000002002421f
+#define CURRENT_IIR_B3  0.000002002421f
+#define CURRENT_IIR_B4  0.000001001210f
+#define CURRENT_IIR_B5  0.000000200242f
+
+#define CURRENT_IIR_A1 -4.695040626100f
+#define CURRENT_IIR_A2  8.826145922560f
+#define CURRENT_IIR_A3 -8.303966693080f
+#define CURRENT_IIR_A4  3.909893994120f
+#define CURRENT_IIR_A5 -0.737026189748f
 
 #define SYSTICK_1KHZ_RELOAD         84000U
 
@@ -94,9 +97,16 @@ typedef struct
 {
     float x1;
     float x2;
+    float x3;
+    float x4;
+    float x5;
+
     float y1;
     float y2;
-} Iir2FilterState;
+    float y3;
+    float y4;
+    float y5;
+} Iir5FilterState;
 
 
 static void clock_init(void);
@@ -114,8 +124,8 @@ static void adc_current_read_all(void);
 static uint16_t adc_read_sequence_value(void);
 static float adc_raw_to_voltage(uint16_t raw);
 static float adc_raw_to_current_amps_with_offset(uint16_t raw, float zero_voltage);
-static void iir2_lowpass_init(Iir2FilterState *state, float value);
-static float iir2_lowpass_update(Iir2FilterState *state, float input);
+static void iir5_lowpass_init(Iir5FilterState *state, float value);
+static float iir5_lowpass_update(Iir5FilterState *state, float input);
 static void current_process_20khz_sample(void);
 static void print_adc_raw_and_offsets(void);
 
@@ -147,9 +157,9 @@ static volatile float current_a_filtered = 0.0f;
 static volatile float current_b_filtered = 0.0f;
 static volatile float current_c_filtered = 0.0f;
 
-static Iir2FilterState current_a_filter_state = {0};
-static Iir2FilterState current_b_filter_state = {0};
-static Iir2FilterState current_c_filter_state = {0};
+static Iir5FilterState current_a_filter_state = {0};
+static Iir5FilterState current_b_filter_state = {0};
+static Iir5FilterState current_c_filter_state = {0};
 
 static volatile uint32_t current_raw_sample_count = 0;
 static volatile uint32_t current_filtered_sample_count = 0;
@@ -191,29 +201,30 @@ int main(void)
 
     //debug_print("Calibrating current zero offsets. Keep motor current at zero...\r\n");
     adc_current_calibrate_zero(); 
+    delay_ms(5U);
     //debug_print("Current zero calibration complete\r\n");
 
     //debug_print("Waiting 5 seconds before printing zero-current voltages...\r\n");
-    delay_ms(5000U);
+    //delay_ms(5000U);
 
     // print_current_zero_voltages();
 
     //debug_print("Waiting another 5 seconds before starting current loop...\r\n");
-    delay_ms(5000U);
+    //delay_ms(5000U);
 
     /*
      * Take one current sample and initialize the 1 kHz IIR filter states.
      * This avoids a startup transient where the filter ramps from zero.
      */
-    adc_current_read_all();
+    // adc_current_read_all();  // Get rid of this as it may be causing non-zero start-up
 
     float initial_current_a = adc_raw_to_current_amps_with_offset(adc_current_a_raw, current_a_zero_voltage);
     float initial_current_b = adc_raw_to_current_amps_with_offset(adc_current_b_raw, current_b_zero_voltage);
     float initial_current_c = adc_raw_to_current_amps_with_offset(adc_current_c_raw, current_c_zero_voltage);
 
-    iir2_lowpass_init(&current_a_filter_state, initial_current_a);
-    iir2_lowpass_init(&current_b_filter_state, initial_current_b);
-    iir2_lowpass_init(&current_c_filter_state, initial_current_c);
+    iir5_lowpass_init(&current_a_filter_state, initial_current_a);
+    iir5_lowpass_init(&current_b_filter_state, initial_current_b);
+    iir5_lowpass_init(&current_c_filter_state, initial_current_c);
 
     current_a_filtered = initial_current_a;
     current_b_filtered = initial_current_b;
@@ -875,7 +886,7 @@ static void adc_current_calibrate_zero(void)
      * Throw away a few initial reads in case the ADC/sensor output
      * has not fully settled yet. Note this can be made bigger.
      */
-    for (uint32_t i = 0; i < 50U; i++)
+    for (uint32_t i = 0; i < 800U; i++)
     {
         adc_current_read_all();
     }
@@ -941,7 +952,7 @@ static float adc_raw_to_current_amps_with_offset(uint16_t raw, float zero_voltag
     return (voltage - zero_voltage) / ACS712_SENSITIVITY;
 }
 
-static void iir2_lowpass_init(Iir2FilterState *state, float value)
+static void iir5_lowpass_init(Iir5FilterState *state, float value)
 {
     if (state == 0)
     {
@@ -950,27 +961,41 @@ static void iir2_lowpass_init(Iir2FilterState *state, float value)
 
     state->x1 = value;
     state->x2 = value;
+    state->x3 = value;
+    state->x4 = value;
+    state->x5 = value;
+
     state->y1 = value;
     state->y2 = value;
+    state->y3 = value;
+    state->y4 = value;
+    state->y5 = value;
 }
 
-static float iir2_lowpass_update(Iir2FilterState *state, float input)
+static float iir5_lowpass_update(Iir5FilterState *state, float input)
 {
-    if (state == 0)
-    {
-        return input;
-    }
-
     float output =
-        CURRENT_IIR_B0 * input +
+        CURRENT_IIR_B0 * input     +
         CURRENT_IIR_B1 * state->x1 +
-        CURRENT_IIR_B2 * state->x2 -
+        CURRENT_IIR_B2 * state->x2 +
+        CURRENT_IIR_B3 * state->x3 +
+        CURRENT_IIR_B4 * state->x4 +
+        CURRENT_IIR_B5 * state->x5 -
         CURRENT_IIR_A1 * state->y1 -
-        CURRENT_IIR_A2 * state->y2;
+        CURRENT_IIR_A2 * state->y2 -
+        CURRENT_IIR_A3 * state->y3 -
+        CURRENT_IIR_A4 * state->y4 -
+        CURRENT_IIR_A5 * state->y5;
 
+    state->x5 = state->x4;
+    state->x4 = state->x3;
+    state->x3 = state->x2;
     state->x2 = state->x1;
     state->x1 = input;
 
+    state->y5 = state->y4;
+    state->y4 = state->y3;
+    state->y3 = state->y2;
     state->y2 = state->y1;
     state->y1 = output;
 
@@ -1002,9 +1027,9 @@ static void current_process_20khz_sample(void)
         current_c_accum = 0.0f;
         current_average_count = 0;
 
-        current_a_filtered = iir2_lowpass_update(&current_a_filter_state, current_a_average);
-        current_b_filtered = iir2_lowpass_update(&current_b_filter_state, current_b_average);
-        current_c_filtered = iir2_lowpass_update(&current_c_filter_state, current_c_average);
+        current_a_filtered = iir5_lowpass_update(&current_a_filter_state, current_a_average);
+        current_b_filtered = iir5_lowpass_update(&current_b_filter_state, current_b_average);
+        current_c_filtered = iir5_lowpass_update(&current_c_filter_state, current_c_average);
 
         current_filtered_sample_count++;
         current_filtered_sample_ready = 1U;
