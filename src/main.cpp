@@ -41,9 +41,13 @@
 //   driver inputs and confirmed polarity, dead time, and fault behavior.
 // -----------------------------------------------------------------------------
 
-#define TIM1_PWM_ARR                400U
-#define TIM1_PWM_50_PERCENT         (TIM1_PWM_ARR / 2U) 
-#define TIM1_DEADTIME_TICKS         16U  // ~1 us at 16 MHz timer clock
+#define SYSCLK_HZ                   84000000U // Setup clock for 84MHz 
+#define PCLK1_HZ                    42000000U
+#define PCLK2_HZ                    84000000U
+
+#define TIM1_PWM_ARR                2100U
+#define TIM1_PWM_50_PERCENT         (TIM1_PWM_ARR / 2U)
+#define TIM1_DEADTIME_TICKS         84U  // 11.9 ns per tick at 84 MHz timer clock (84 ticks is 1 us) 
 
 #define ADC_MAX_COUNTS              4095U
 #define ADC_REFERENCE_VOLTAGE       3.3f
@@ -84,7 +88,7 @@
 #define CURRENT_IIR_A1             -1.911197067427f
 #define CURRENT_IIR_A2              0.914975834801f
 
-#define SYSTICK_1KHZ_RELOAD         16000U  // 16 MHz / 1000 = 16000 ticks for 1 kHz
+#define SYSTICK_1KHZ_RELOAD         84000U
 
 typedef struct
 {
@@ -264,24 +268,90 @@ int main(void)
 }
 
 // -----------------------------------------------------------------------------
-// Clock: select HSI (16 MHz) as SYSCLK, no PLL
+// Clock setup:
+//   Source: HSI = 16 MHz
+//   PLLM = 16
+//   PLLN = 336
+//   PLLP = 4
+//   PLLQ = 7
+//
+//   VCO input  = 16 MHz / 16 = 1 MHz
+//   VCO output = 1 MHz * 336 = 336 MHz
+//   SYSCLK     = 336 MHz / 4 = 84 MHz
+//   USB clock  = 336 MHz / 7 = 48 MHz
+//
+//   AHB  / HCLK  = 84 MHz
+//   APB1 / PCLK1 = 42 MHz
+//   APB2 / PCLK2 = 84 MHz
 // -----------------------------------------------------------------------------
 static void clock_init(void)
 {
     // Enable HSI
     RCC->CR |= RCC_CR_HSION;
 
-    // Wait for HSI to be ready
-    while (!(RCC->CR & RCC_CR_HSIRDY)) {}
+    // Wait for HSI ready
+    while (!(RCC->CR & RCC_CR_HSIRDY))
+    {
+    }
 
-    // Select HSI as SYSCLK
-    RCC->CFGR = (RCC->CFGR & ~RCC_CFGR_SW) | RCC_CFGR_SW_HSI;
+    // Enable power interface clock
+    RCC->APB1ENR |= RCC_APB1ENR_PWREN;
 
-    // Wait until HSI is used as SYSCLK
-    while ((RCC->CFGR & RCC_CFGR_SWS) != RCC_CFGR_SWS_HSI) {}
+    // Configure voltage scaling.
+    // On STM32F4, this is commonly used before increasing SYSCLK.
+    PWR->CR |= PWR_CR_VOS;
 
-    // AHB, APB1, APB2 all at full speed (no dividers)
+    // Configure Flash latency and caches for 84 MHz.
+    FLASH->ACR = FLASH_ACR_ICEN |
+                 FLASH_ACR_DCEN |
+                 FLASH_ACR_PRFTEN |
+                 FLASH_ACR_LATENCY_2WS;
+
+    // Disable PLL before configuration
+    RCC->CR &= ~RCC_CR_PLLON;
+
+    while (RCC->CR & RCC_CR_PLLRDY)
+    {
+    }
+
+    // Configure PLL:
+    // PLL source = HSI
+    // PLLM = 16
+    // PLLN = 336
+    // PLLP = 4
+    // PLLQ = 7
+    RCC->PLLCFGR =
+        (16U << RCC_PLLCFGR_PLLM_Pos) |
+        (336U << RCC_PLLCFGR_PLLN_Pos) |
+        (1U << RCC_PLLCFGR_PLLP_Pos) |      // 01 means PLLP = 4
+        (7U << RCC_PLLCFGR_PLLQ_Pos) |
+        RCC_PLLCFGR_PLLSRC_HSI;
+
+    // Configure bus prescalers before switching SYSCLK
+    //
+    // AHB  = SYSCLK / 1 = 84 MHz
+    // APB1 = HCLK   / 2 = 42 MHz
+    // APB2 = HCLK   / 1 = 84 MHz
     RCC->CFGR &= ~(RCC_CFGR_HPRE | RCC_CFGR_PPRE1 | RCC_CFGR_PPRE2);
+
+    RCC->CFGR |= RCC_CFGR_PPRE1_DIV2;
+
+    // Enable PLL
+    RCC->CR |= RCC_CR_PLLON;
+
+    // Wait for PLL ready
+    while (!(RCC->CR & RCC_CR_PLLRDY))
+    {
+    }
+
+    // Select PLL as system clock
+    RCC->CFGR &= ~RCC_CFGR_SW;
+    RCC->CFGR |= RCC_CFGR_SW_PLL;
+
+    // Wait until PLL is used as SYSCLK
+    while ((RCC->CFGR & RCC_CFGR_SWS) != RCC_CFGR_SWS_PLL)
+    {
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -461,7 +531,7 @@ static void tim1_pwm_init(void)
     // Disable counter during configuration
     TIM1->CR1 &= ~TIM_CR1_CEN;
 
-    // Prescaler = 0: timer clock = 16 MHz
+    // Prescaler = 0: timer clock = 84 MHz
     TIM1->PSC = 0U;
 
     // Auto-reload value for 20 kHz center-aligned PWM
@@ -740,7 +810,9 @@ static void adc_current_init(void)
                       (3U << (1U * 2U)));
 
     // ADC common prescaler: ADCPRE = 01 means PCLK2 / 4.
-    // With current 16 MHz HSI/PCLK2 setup, ADC clock = 4 MHz.
+    // With PLL setup:
+    //   PCLK2 = 84 MHz
+    //   ADC clock = 84 MHz / 4 = 21 MHz
     ADC->CCR &= ~(3U << 16);
     ADC->CCR |=  (1U << 16);
 
@@ -772,14 +844,9 @@ static void adc_current_init(void)
     // Channel 4 is in SMPR2. Channels 10 and 11 are in SMPR1.
 
     ADC1->SMPR2 &= ~(7U << (4U * 3U));
-    //ADC1->SMPR2 |=  (4U << (4U * 3U)); // 84 cycles for current reading
     ADC1->SMPR2 |= (6U << (4U * 3U)); // 144 cycles for current reading, more stable but slower
-
     ADC1->SMPR1 &= ~((7U << ((10U - 10U) * 3U)) |
                      (7U << ((11U - 10U) * 3U)));
-
-    // ADC1->SMPR1 |=  ((4U << ((10U - 10U) * 3U)) |
-    //                  (4U << ((11U - 10U) * 3U)));
     ADC1->SMPR1 |=  ((6U << ((10U - 10U) * 3U)) |
                     (6U << ((11U - 10U) * 3U)));  // 144 cycles for current reading, more stable but slower
 
@@ -1098,8 +1165,8 @@ static void uart2_init(void)
     GPIOA->AFR[0] &= ~((0xFU << 8) | (0xFU << 12));
     GPIOA->AFR[0] |=  ((7U  << 8) | (7U  << 12));
 
-    // Baud rate: 16MHz / 115200 = 138
-    USART2->BRR = 16000000 / 115200;
+    // 42 MHz APB1, 115200 baud, oversampling by 16
+    USART2->BRR = (PCLK1_HZ + (115200U / 2U)) / 115200U;  // USART2->BRR = 0x016D;
 
     // 8 data bits, no parity, 1 stop bit
     USART2->CR2 &= ~USART_CR2_STOP;   // 1 stop bit
