@@ -51,11 +51,48 @@
 #define ACS712_SENSITIVITY          0.1183f  // 185mV/A for ACS712ELC-5A //0.1183 represents factor with voltage divider
 
 #define CURRENT_ZERO_CAL_SAMPLES    10000U // From 1000Uß
-#define CURRENT_PRINT_DECIMATION    1000U // Changed from 20U
+// #define CURRENT_FILTER_ALPHA        0.1f  // Exponential moving average filter alpha (0.239)
 
-#define CURRENT_FILTER_ALPHA        0.1f  // Exponential moving average filter alpha (0.239)
+/*
+ * ADC sampling is synchronized to TIM1 PWM at 20 kHz.
+ * Every 20 raw IA/IB/IC sample sets are averaged, producing a 1 kHz
+ * averaged-current stream.
+ */
+#define CURRENT_RAW_SAMPLE_RATE_HZ   20000U // 20kHz raw sample rate synchronized to PWM
+#define CURRENT_AVERAGE_BLOCK_SIZE   20U    // Number of raw samples to average for each printed/filtered current value
+#define CURRENT_FILTERED_RATE_HZ     (CURRENT_RAW_SAMPLE_RATE_HZ / CURRENT_AVERAGE_BLOCK_SIZE) // 1000 Hz after averaging
+
+/*
+ * This decimates the 1 kHz filtered-current stream for UART printing.
+ * 1000 means print once per second.
+ */
+#define CURRENT_PRINT_DECIMATION    1000U // 1 per second
+
+/*
+ * 2nd-order Butterworth low-pass IIR filter.
+ * Designed for:
+ *   sample rate = 1000 Hz
+ *   cutoff      = 10 Hz
+ *
+ * Difference equation:
+ *   y[n] = b0*x[n] + b1*x[n-1] + b2*x[n-2]
+ *        - a1*y[n-1] - a2*y[n-2]
+ */
+#define CURRENT_IIR_B0              0.000944691843f
+#define CURRENT_IIR_B1              0.001889383686f
+#define CURRENT_IIR_B2              0.000944691843f
+#define CURRENT_IIR_A1             -1.911197067427f
+#define CURRENT_IIR_A2              0.914975834801f
 
 #define SYSTICK_1KHZ_RELOAD         16000U  // 16 MHz / 1000 = 16000 ticks for 1 kHz
+
+typedef struct
+{
+    float x1;
+    float x2;
+    float y1;
+    float y2;
+} Iir2FilterState;
 
 
 static void clock_init(void);
@@ -63,6 +100,7 @@ static void gpio_init(void);
 
 static void tim1_pwm_gpio_init(void);
 static void tim1_pwm_init(void);
+static void tim1_current_sampling_interrupt_init(void);
 
 static void encoder_tim2_init(void);
 
@@ -71,13 +109,16 @@ static void adc_current_calibrate_zero(void);
 static void adc_current_read_all(void);
 static uint16_t adc_read_sequence_value(void);
 static float adc_raw_to_voltage(uint16_t raw);
-static float low_pass_filter(float previous, float input);
 static float adc_raw_to_current_amps_with_offset(uint16_t raw, float zero_voltage);
+static void iir2_lowpass_init(Iir2FilterState *state, float value);
+static float iir2_lowpass_update(Iir2FilterState *state, float input);
+static void current_process_20khz_sample(void);
 static void print_adc_raw_and_offsets(void);
 
 static void systick_1khz_init(void);
 static uint8_t systick_1ms_elapsed(void);
 static void delay_ms(uint32_t ms);
+
 static void print_current_zero_voltages(void);
 
 static void print_current_values_ma(float current_a, float current_b, float current_c);
@@ -98,9 +139,23 @@ static float current_a_zero_voltage = 0.0f;
 static float current_b_zero_voltage = 0.0f;
 static float current_c_zero_voltage = 0.0f;
 
-static float current_a_filtered = 0.0f;
-static float current_b_filtered = 0.0f;
-static float current_c_filtered = 0.0f;
+static volatile float current_a_filtered = 0.0f;
+static volatile float current_b_filtered = 0.0f;
+static volatile float current_c_filtered = 0.0f;
+
+static Iir2FilterState current_a_filter_state = {0};
+static Iir2FilterState current_b_filter_state = {0};
+static Iir2FilterState current_c_filter_state = {0};
+
+static volatile uint32_t current_raw_sample_count = 0;
+static volatile uint32_t current_filtered_sample_count = 0;
+static volatile uint8_t current_filtered_sample_ready = 0;
+
+static float current_a_accum = 0.0f;
+static float current_b_accum = 0.0f;
+static float current_c_accum = 0.0f;
+static uint32_t current_average_count = 0;
+
 
 int main(void)
 {
@@ -117,8 +172,8 @@ int main(void)
     adc_current_init();
 
     /*
-     * SysTick must be initialized before using delay_ms().
-     * It is also used later for the 1 kHz current sampling loop.
+     * SysTick is only used for startup delays now.
+     * Current sampling is no longer driven by SysTick; it is driven by TIM1.
      */
     systick_1khz_init();
 
@@ -137,50 +192,72 @@ int main(void)
     //debug_print("Waiting 5 seconds before printing zero-current voltages...\r\n");
     delay_ms(5000U);
 
-    // print_current_zero_voltages();
+    print_current_zero_voltages();
 
     //debug_print("Waiting another 5 seconds before starting current loop...\r\n");
     delay_ms(5000U);
 
     /*
-     * Take one current sample and initialize the filtered current values.
-     * This prevents the filter from starting at 0 and slowly ramping toward
-     * the actual measured current.
+     * Take one current sample and initialize the 1 kHz IIR filter states.
+     * This avoids a startup transient where the filter ramps from zero.
      */
     adc_current_read_all();
 
-    current_a_filtered = adc_raw_to_current_amps_with_offset(adc_current_a_raw, current_a_zero_voltage);
-    current_b_filtered = adc_raw_to_current_amps_with_offset(adc_current_b_raw, current_b_zero_voltage);
-    current_c_filtered = adc_raw_to_current_amps_with_offset(adc_current_c_raw, current_c_zero_voltage);
+    float initial_current_a = adc_raw_to_current_amps_with_offset(adc_current_a_raw, current_a_zero_voltage);
+    float initial_current_b = adc_raw_to_current_amps_with_offset(adc_current_b_raw, current_b_zero_voltage);
+    float initial_current_c = adc_raw_to_current_amps_with_offset(adc_current_c_raw, current_c_zero_voltage);
+
+    iir2_lowpass_init(&current_a_filter_state, initial_current_a);
+    iir2_lowpass_init(&current_b_filter_state, initial_current_b);
+    iir2_lowpass_init(&current_c_filter_state, initial_current_c);
+
+    current_a_filtered = initial_current_a;
+    current_b_filtered = initial_current_b;
+    current_c_filtered = initial_current_c;
+
+    current_a_accum = 0.0f;
+    current_b_accum = 0.0f;
+    current_c_accum = 0.0f;
+    current_average_count = 0;
+    current_raw_sample_count = 0;
+    current_filtered_sample_count = 0;
+    current_filtered_sample_ready = 0;
 
     // print_adc_raw_and_offsets();
 
-    uint32_t current_sample_count = 0;
+    /*
+     * Start PWM-synchronized current sampling.
+     * TIM1 channel 4 compare interrupt fires once per 20 kHz PWM cycle.
+     * Each interrupt reads IA/IB/IC, accumulates 20 samples, then updates
+     * the 1 kHz Butterworth-filtered current values.
+     */
+    tim1_current_sampling_interrupt_init();
+
+    uint32_t last_printed_filtered_sample_count = 0;
+
 
     while (1)
     {
-        /*
-         * Current sampling runs at 1 kHz.
-         * SysTick fires every 1 ms.
-         */
-        if (systick_1ms_elapsed())
+        if (current_filtered_sample_ready != 0U)
         {
-            adc_current_read_all();
+            float current_a_to_print;
+            float current_b_to_print;
+            float current_c_to_print;
+            uint32_t filtered_sample_count_snapshot;
 
-            float current_a = adc_raw_to_current_amps_with_offset(adc_current_a_raw, current_a_zero_voltage);
-            float current_b = adc_raw_to_current_amps_with_offset(adc_current_b_raw, current_b_zero_voltage);
-            float current_c = adc_raw_to_current_amps_with_offset(adc_current_c_raw, current_c_zero_voltage);
+            __disable_irq();
+            current_a_to_print = current_a_filtered;
+            current_b_to_print = current_b_filtered;
+            current_c_to_print = current_c_filtered;
+            filtered_sample_count_snapshot = current_filtered_sample_count;
+            current_filtered_sample_ready = 0U;
+            __enable_irq();
 
-            current_a_filtered = low_pass_filter(current_a_filtered, current_a);
-            current_b_filtered = low_pass_filter(current_b_filtered, current_b);
-            current_c_filtered = low_pass_filter(current_c_filtered, current_c);
-
-            current_sample_count++;
-
-            if ((current_sample_count % CURRENT_PRINT_DECIMATION) == 0U)
+            if ((filtered_sample_count_snapshot != last_printed_filtered_sample_count) &&
+                ((filtered_sample_count_snapshot % CURRENT_PRINT_DECIMATION) == 0U))
             {
-                //print_current_values_ma(current_a_filtered, current_b_filtered, current_c_filtered);
-                print_current_values_ma(current_a, current_b, current_c);
+                last_printed_filtered_sample_count = filtered_sample_count_snapshot;
+                print_current_values_ma(current_a_to_print, current_b_to_print, current_c_to_print);
             }
         }
     }
@@ -467,6 +544,39 @@ static void tim1_pwm_init(void)
     TIM1->CR1 |= TIM_CR1_CEN;
 }
 
+// -----------------------------------------------------------------------------
+// TIM1 CH4 current-sampling trigger setup
+//
+// TIM1 is already running center-aligned PWM at 20 kHz. CH1/2/3 generate PWM.
+// CH4 is not connected to a pin here; it is used only as an internal timing
+// point. Setting CCR4 = ARR causes one compare event near the top of the
+// center-aligned PWM cycle, once per PWM period.
+//
+// This interrupt starts the software ADC read for IA/IB/IC at the same point in
+// each PWM cycle.
+// -----------------------------------------------------------------------------
+static void tim1_current_sampling_interrupt_init(void)
+{
+    TIM1->CCR4 = TIM1_PWM_ARR;
+
+    // Clear any stale CH4 compare flag before enabling the interrupt.
+    TIM1->SR &= ~TIM_SR_CC4IF;
+
+    // Enable TIM1 capture/compare interrupt for CH4.
+    TIM1->DIER |= TIM_DIER_CC4IE;
+
+    NVIC_SetPriority(TIM1_CC_IRQn, 1U);
+    NVIC_EnableIRQ(TIM1_CC_IRQn);
+}
+
+extern "C" void TIM1_CC_IRQHandler(void)
+{
+    if ((TIM1->SR & TIM_SR_CC4IF) != 0U)
+    {
+        TIM1->SR &= ~TIM_SR_CC4IF;
+        current_process_20khz_sample();
+    }
+}
 
 // -----------------------------------------------------------------------------
 // Encoder TIM2 setup:
@@ -696,7 +806,7 @@ static void adc_current_calibrate_zero(void)
 
     /*
      * Throw away a few initial reads in case the ADC/sensor output
-     * has not fully settled yet.
+     * has not fully settled yet. Note this can be made bigger.
      */
     for (uint32_t i = 0; i < 20U; i++)
     {
@@ -758,18 +868,81 @@ static float adc_raw_to_voltage(uint16_t raw)
     return ((float)raw * ADC_REFERENCE_VOLTAGE) / (float)ADC_MAX_COUNTS;
 }
 
-static float low_pass_filter(float previous, float input)
-{
-    return (previous + CURRENT_FILTER_ALPHA * (input - previous));
-}
-
-
 static float adc_raw_to_current_amps_with_offset(uint16_t raw, float zero_voltage)
 {
     float voltage = adc_raw_to_voltage(raw);
     return (voltage - zero_voltage) / ACS712_SENSITIVITY;
 }
 
+static void iir2_lowpass_init(Iir2FilterState *state, float value)
+{
+    if (state == 0)
+    {
+        return;
+    }
+
+    state->x1 = value;
+    state->x2 = value;
+    state->y1 = value;
+    state->y2 = value;
+}
+
+static float iir2_lowpass_update(Iir2FilterState *state, float input)
+{
+    if (state == 0)
+    {
+        return input;
+    }
+
+    float output =
+        CURRENT_IIR_B0 * input +
+        CURRENT_IIR_B1 * state->x1 +
+        CURRENT_IIR_B2 * state->x2 -
+        CURRENT_IIR_A1 * state->y1 -
+        CURRENT_IIR_A2 * state->y2;
+
+    state->x2 = state->x1;
+    state->x1 = input;
+
+    state->y2 = state->y1;
+    state->y1 = output;
+
+    return output;
+}
+
+static void current_process_20khz_sample(void)
+{
+    adc_current_read_all();
+
+    float current_a = adc_raw_to_current_amps_with_offset(adc_current_a_raw, current_a_zero_voltage);
+    float current_b = adc_raw_to_current_amps_with_offset(adc_current_b_raw, current_b_zero_voltage);
+    float current_c = adc_raw_to_current_amps_with_offset(adc_current_c_raw, current_c_zero_voltage);
+
+    current_a_accum += current_a;
+    current_b_accum += current_b;
+    current_c_accum += current_c;
+    current_average_count++;
+    current_raw_sample_count++;
+
+    if (current_average_count >= CURRENT_AVERAGE_BLOCK_SIZE)
+    {
+        float current_a_average = current_a_accum / (float)CURRENT_AVERAGE_BLOCK_SIZE;
+        float current_b_average = current_b_accum / (float)CURRENT_AVERAGE_BLOCK_SIZE;
+        float current_c_average = current_c_accum / (float)CURRENT_AVERAGE_BLOCK_SIZE;
+
+        current_a_accum = 0.0f;
+        current_b_accum = 0.0f;
+        current_c_accum = 0.0f;
+        current_average_count = 0;
+
+        current_a_filtered = iir2_lowpass_update(&current_a_filter_state, current_a_average);
+        current_b_filtered = iir2_lowpass_update(&current_b_filter_state, current_b_average);
+        current_c_filtered = iir2_lowpass_update(&current_c_filter_state, current_c_average);
+
+        current_filtered_sample_count++;
+        current_filtered_sample_ready = 1U;
+    }
+}
 
 // -----------------------------------------------------------------------------
 // SysTick setup:
@@ -831,7 +1004,7 @@ static void print_current_zero_voltages(void)
 // Print current values in milliamps.
 //
 // Using integer milliamps avoids requiring printf floating-point support.
-// Printed every 20th 1 kHz sample, so output rate is 50 Hz.
+// Printed every CURRENT_PRINT_DECIMATION filtered samples.
 // -----------------------------------------------------------------------------
 static void print_current_values_ma(float current_a, float current_b, float current_c)
 {
@@ -841,20 +1014,18 @@ static void print_current_values_ma(float current_a, float current_b, float curr
     int32_t current_b_ma = (int32_t)(current_b * 1000.0f);
     int32_t current_c_ma = (int32_t)(current_c * 1000.0f);
 
-    // debug_print("IA=");
+    debug_print("IA=");
     int32_to_string(current_a_ma, value_string, sizeof(value_string));
     debug_print(value_string);
-    debug_print(";");
-    // debug_print(" mA, IB=");
+    debug_print(" mA, IB=");
 
     int32_to_string(current_b_ma, value_string, sizeof(value_string));
     debug_print(value_string);
-    debug_print(";");
-    // debug_print(" mA, IC=");
+    debug_print(" mA, IC=");
 
     int32_to_string(current_c_ma, value_string, sizeof(value_string));
     debug_print(value_string);
-    // debug_print(" mA, ENC=");
+    debug_print(" mA, ENC=");
 
     int32_to_string((int32_t)TIM2->CNT, value_string, sizeof(value_string));
     debug_print(value_string);
