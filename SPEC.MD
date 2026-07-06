@@ -22,7 +22,7 @@ application.
 - PlatformIO environment: `nucleo_f446re`.
 - Framework package: `stm32cube`.
 - Upload/debug: ST-Link.
-- Serial monitor baud rate: `115200`.
+- Serial monitor baud rate: `921600`.
 - Firmware style: register-level programming through CMSIS device definitions.
 
 Do not introduce HAL application code unless the project intentionally changes

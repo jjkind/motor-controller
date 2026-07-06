@@ -4,7 +4,7 @@
         {
             "label": "Upload, Monitor, and Log to File",
             "type": "shell",
-            "command": "mkdir -p logs && pio run -t upload && pio device monitor -b 115200 | tee logs/current_log.csv",
+            "command": "mkdir -p logs && pio run -t upload && pio device monitor -b 921600 | tee logs/current_log.csv",
             "group": "build",
             "problemMatcher": [],
             "presentation": {

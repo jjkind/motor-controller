@@ -1160,8 +1160,8 @@ static void print_adc_raw_and_offsets(void)
 
 
 // -----------------------------------------------------------------------------
-// UART2: PA2=TX, PA3=RX, AF7, 115200 8N1, 16MHz clock
-// BRR = 16000000 / 115200 = 138
+// UART2: PA2=TX, PA3=RX, AF7, 921600 8N1, 42 MHz APB1 clock
+// BRR = round(42000000 / 921600) = 46
 // -----------------------------------------------------------------------------
 static void uart2_init(void)
 {
@@ -1192,8 +1192,8 @@ static void uart2_init(void)
     GPIOA->AFR[0] &= ~((0xFU << 8) | (0xFU << 12));
     GPIOA->AFR[0] |=  ((7U  << 8) | (7U  << 12));
 
-    // 42 MHz APB1, 115200 baud, oversampling by 16
-    USART2->BRR = (PCLK1_HZ + (115200U / 2U)) / 115200U;  // USART2->BRR = 0x016D;
+    // 42 MHz APB1, 921600 baud, oversampling by 16
+    USART2->BRR = (PCLK1_HZ + (921600U / 2U)) / 921600U;  // USART2->BRR = 0x002E;
 
     // 8 data bits, no parity, 1 stop bit
     USART2->CR2 &= ~USART_CR2_STOP;   // 1 stop bit
