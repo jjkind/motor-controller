@@ -7,3 +7,10 @@
 
 logs/
 .venv/
+
+# Ignore generated/non-source files under test, but keep Python helpers trackable.
+test/*
+!test/
+!test/*.py
+!test/requirements.txt
+!test/README
