@@ -70,7 +70,9 @@
  * This decimates the 1 kHz filtered-current stream for UART printing.
  * 1000 means print once per second.
  */
-#define CURRENT_PRINT_DECIMATION    20U // 1 per milli-second
+#define CURRENT_PRINT_DECIMATION    1U // 1 per milli-second
+
+#define UART2_TX_BUFFER_SIZE        1024U
 
 /*
  * 5th-order Butterworth low-pass IIR filter.
@@ -138,6 +140,7 @@ static void print_current_zero_voltages(void);
 static void print_current_values_ma(float current_a, float current_b, float current_c);
 
 static void uart2_init(void);
+static uint8_t uart2_tx_try_enqueue(uint8_t byte);
 static void debug_print(const char *msg);
 
 static void delay(volatile uint32_t count);
@@ -169,6 +172,11 @@ static float current_a_accum = 0.0f;
 static float current_b_accum = 0.0f;
 static float current_c_accum = 0.0f;
 static uint32_t current_average_count = 0;
+
+static volatile uint8_t uart2_tx_buffer[UART2_TX_BUFFER_SIZE] = {0};
+static volatile uint32_t uart2_tx_head = 0;
+static volatile uint32_t uart2_tx_tail = 0;
+static volatile uint32_t uart2_tx_dropped_bytes = 0;
 
 
 int main(void)
@@ -1200,11 +1208,86 @@ static void uart2_init(void)
     USART2->CR1  = USART_CR1_UE       // enable USART
                  | USART_CR1_TE       // enable TX
                  | USART_CR1_RE;      // enable RX
+
+    /*
+     * USART2 TX uses TXE interrupts to drain the software ring buffer.
+     * TIM1 current sampling has priority 1, so USART2 stays lower priority.
+     */
+    NVIC_SetPriority(USART2_IRQn, 2U);
+    NVIC_EnableIRQ(USART2_IRQn);
 }
 
 
 // -----------------------------------------------------------------------------
-// Print a null-terminated string over UART2
+// Queue one byte for non-blocking UART2 transmit.
+//
+// If the buffer is full, the byte is dropped. Dropping telemetry is preferred
+// over blocking time-sensitive sampling/control code.
+// -----------------------------------------------------------------------------
+static uint8_t uart2_tx_try_enqueue(uint8_t byte)
+{
+    uint8_t queued = 0U;
+    uint32_t primask = __get_PRIMASK();
+
+    __disable_irq();
+
+    uint32_t next_head = uart2_tx_head + 1U;
+    if (next_head >= UART2_TX_BUFFER_SIZE)
+    {
+        next_head = 0U;
+    }
+
+    if (next_head != uart2_tx_tail)
+    {
+        uart2_tx_buffer[uart2_tx_head] = byte;
+        uart2_tx_head = next_head;
+        queued = 1U;
+
+        // Start or continue TXE-driven transmission.
+        USART2->CR1 |= USART_CR1_TXEIE;
+    }
+    else
+    {
+        uart2_tx_dropped_bytes++;
+    }
+
+    if (primask == 0U)
+    {
+        __enable_irq();
+    }
+
+    return queued;
+}
+
+
+extern "C" void USART2_IRQHandler(void)
+{
+    if (((USART2->CR1 & USART_CR1_TXEIE) != 0U) &&
+        ((USART2->SR & USART_SR_TXE) != 0U))
+    {
+        if (uart2_tx_tail != uart2_tx_head)
+        {
+            USART2->DR = uart2_tx_buffer[uart2_tx_tail];
+
+            uint32_t next_tail = uart2_tx_tail + 1U;
+            if (next_tail >= UART2_TX_BUFFER_SIZE)
+            {
+                next_tail = 0U;
+            }
+
+            uart2_tx_tail = next_tail;
+        }
+        else
+        {
+            // Nothing left to send; stop TXE interrupts until new data arrives.
+            USART2->CR1 &= ~USART_CR1_TXEIE;
+        }
+    }
+}
+
+
+// -----------------------------------------------------------------------------
+// Queue a null-terminated string for non-blocking UART2 transmit.
 // -----------------------------------------------------------------------------
 static void debug_print(const char *msg)
 {
@@ -1212,13 +1295,13 @@ static void debug_print(const char *msg)
 
     while (*msg)
     {
-        // Wait for TX register empty
-        while (!(USART2->SR & USART_SR_TXE)) {}
-        USART2->DR = (uint8_t)*msg++;
-    }
+        if (uart2_tx_try_enqueue((uint8_t)*msg) == 0U)
+        {
+            break;
+        }
 
-    // Wait for transmission complete
-    while (!(USART2->SR & USART_SR_TC)) {}
+        msg++;
+    }
 }
 
 

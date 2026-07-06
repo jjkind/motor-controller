@@ -19,7 +19,7 @@ Processing pipeline:
     2. Average every 5 samples.
        Effective sample rate becomes 200 Hz.
     3. Apply a 2nd-order Butterworth low-pass IIR filter.
-       Cutoff frequency = 10 Hz.
+       Cutoff frequency = 5 Hz.
        Filter sample rate = 200 Hz.
 
 This script creates two plots:
@@ -47,19 +47,19 @@ AVERAGED_SAMPLE_RATE_HZ = 1.0 / AVERAGED_SAMPLE_PERIOD_SEC
 # 2nd-order Butterworth low-pass IIR coefficients.
 # Designed for:
 #   sample rate = 200 Hz
-#   cutoff      = 10 Hz
+#   cutoff      = 5 Hz
 #
 # Difference equation:
 #   y[n] = b0*x[n] + b1*x[n-1] + b2*x[n-2]
 #        - a1*y[n-1] - a2*y[n-2]
 #
-# These coefficients correspond to scipy.signal.butter(2, 10, btype="low", fs=200).
-IIR_B0 = 0.020083365564
-IIR_B1 = 0.040166731128
-IIR_B2 = 0.020083365564
+# These coefficients correspond to scipy.signal.butter(2, 5, btype="low", fs=200).
+IIR_B0 = 0.005542717210
+IIR_B1 = 0.011085434421
+IIR_B2 = 0.005542717210
 
-IIR_A1 = -1.561018075801
-IIR_A2 = 0.641351538057
+IIR_A1 = -1.778631777825
+IIR_A2 = 0.800802646666
 
 
 def read_current_log(csv_path: str | Path) -> pd.DataFrame:
@@ -190,8 +190,8 @@ def plot_unfiltered_currents(df: pd.DataFrame, output_path: str | Path | None = 
     plt.figure(figsize=(12, 6))
 
     plt.plot(df["time_s"], df["IA_mA"], label="IA raw", color="red")
-    # plt.plot(df["time_s"], df["IB_mA"], label="IB raw", color="blue")
-    # plt.plot(df["time_s"], df["IC_mA"], label="IC raw", color="gold")
+    plt.plot(df["time_s"], df["IB_mA"], label="IB raw", color="blue")
+    plt.plot(df["time_s"], df["IC_mA"], label="IC raw", color="gold")
 
     plt.xlabel("Time (s)")
     plt.ylabel("Current (mA)")
@@ -214,12 +214,12 @@ def plot_averaged_and_filtered_currents(
     plt.figure(figsize=(12, 6))
 
     plt.plot(df["time_s"], df["IA_mA_iir"], label="IA avg + IIR", color="red")
-    # plt.plot(df["time_s"], df["IB_mA_iir"], label="IB avg + IIR", color="blue")
-    # plt.plot(df["time_s"], df["IC_mA_iir"], label="IC avg + IIR", color="gold")
+    plt.plot(df["time_s"], df["IB_mA_iir"], label="IB avg + IIR", color="blue")
+    plt.plot(df["time_s"], df["IC_mA_iir"], label="IC avg + IIR", color="gold")
 
     plt.xlabel("Time (s)")
     plt.ylabel("Current (mA)")
-    plt.title("Averaged every 5 samples + 2nd-order 10 Hz Butterworth IIR")
+    plt.title("Averaged every 5 samples + 2nd-order 5 Hz Butterworth IIR")
     plt.grid(True)
     plt.legend()
     plt.tight_layout()
@@ -241,7 +241,7 @@ def output_paths_from_base(output_path: str | Path | None) -> tuple[Path | None,
     parent = output_path.parent
 
     unfiltered_path = parent / f"{stem}_raw_unfiltered{suffix}"
-    filtered_path = parent / f"{stem}_avg5_iir2_10hz{suffix}"
+    filtered_path = parent / f"{stem}_avg5_iir2_5hz{suffix}"
 
     return unfiltered_path, filtered_path
 
@@ -250,7 +250,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
             "Plot IA, IB, and IC versus time. Then average every 5 samples "
-            "and apply a 2nd-order 10 Hz Butterworth IIR filter."
+            "and apply a 2nd-order 5 Hz Butterworth IIR filter."
         )
     )
     parser.add_argument("csv_file", help="Path to current log CSV file")
@@ -259,7 +259,7 @@ def main() -> None:
         "-o",
         help=(
             "Optional base output image path, e.g. logs/current_plot.png. "
-            "The script will create *_raw_unfiltered.png and *_avg5_iir2_10hz.png."
+            "The script will create *_raw_unfiltered.png and *_avg5_iir2_5hz.png."
         ),
     )
     args = parser.parse_args()
@@ -276,7 +276,7 @@ def main() -> None:
     print(f"Averaged samples: {len(filtered_df)}")
     print(f"Averaged sample period: {AVERAGED_SAMPLE_PERIOD_SEC} s")
     print(f"Averaged sample rate: {AVERAGED_SAMPLE_RATE_HZ:.1f} Hz")
-    print("IIR filter: 2nd-order Butterworth low-pass, cutoff = 10 Hz, sample rate = 200 Hz")
+    print("IIR filter: 2nd-order Butterworth low-pass, cutoff = 5 Hz, sample rate = 200 Hz")
 
     unfiltered_output_path, filtered_output_path = output_paths_from_base(args.output)
 
